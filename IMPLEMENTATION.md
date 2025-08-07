@@ -140,6 +140,31 @@ claude.on('run_user_code', async (command) => {
 });
 ```
 
+### The Process Hierarchy Problem
+
+**Critical Architectural Constraint**: Claude Code runs INSIDE the container, not at the Worker level where our SDK is. This creates a fundamental problem:
+
+```
+Worker Level (Has SDK)
+    └── Container
+         └── Claude Code Process (has secrets)
+              ├── Spawns: aws s3 ls (needs secrets ✅)
+              ├── Spawns: node app.js (must NOT have secrets ❌)
+              └── Problem: How does Claude control this?
+```
+
+The process hierarchy distinction:
+```
+Platform Developer
+    ├── Calls sandbox.startProcessWithSecrets('claude', {env: secrets})
+    │       └── Claude Process (has secrets in its environment)
+    │            ├── Runs: subprocess.run(['aws', 's3', 'ls'])
+    │            │    └── Subprocess inherits ALL of Claude's env (INCLUDING SECRETS!)
+    │            └── Runs: subprocess.run(['node', 'app.js'])
+    │                 └── Subprocess inherits ALL of Claude's env (SECURITY BREACH!)
+    └── The Problem: Claude can't use our SDK - it's inside the container!
+```
+
 ### The Uncontrollable AI Problem
 
 **Critical Issue**: AI models are not 100% steerable. Even with clear instructions, Claude Code might:
@@ -151,27 +176,128 @@ claude.on('run_user_code', async (command) => {
 
 This means we CANNOT rely on the AI to always make the right decision about security contexts.
 
-### Proposed Solution Architecture
+### Radical Solution Options
 
-Given these complexities, our implementation needs to support:
+#### Option 1: Command Interception Proxy
+Replace standard shell with a proxy that routes commands back to the Worker:
+```bash
+# Inside container, Claude runs:
+aws s3 ls  # This actually calls our proxy
 
-1. **Explicit Secret Boundaries**: Make it impossible to accidentally leak secrets
-2. **Granular Control**: Each command can be individually secured
-3. **Default-Deny**: By default, NO secrets are available
-4. **Audit Trail**: Log every secret access for review
+# Our proxy (in container) calls back to Worker:
+GET /decide-execution?cmd=aws+s3+ls
+# Worker responds: {"useSecrets": true}
+
+# Proxy then executes with or without secrets based on response
+```
+
+#### Option 2: Two-Container Architecture
+```typescript
+// Platform starts TWO containers
+const platformContainer = await sandbox.startContainer('platform-ops', {
+  env: { AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY }
+});
+
+const userContainer = await sandbox.startContainer('user-code', {
+  env: {} // No secrets
+});
+
+// Claude Code somehow needs to know which container to use
+// Maybe via special commands or prefixes
+```
+
+#### Option 3: Sudo-like Wrapper Binary
+```bash
+# Install special binary in container
+# Claude learns to use it for platform operations
+
+# With secrets:
+with-platform-auth aws s3 ls
+with-platform-auth npm publish
+
+# Without secrets (normal):
+node app.js
+npm test
+```
+
+#### Option 4: Environment Variable Filtering via LD_PRELOAD
+```c
+// Custom library that intercepts getenv() calls
+// Filters based on process name/command
+// Preloaded for all processes in container
+
+// aws, gcloud, npm -> can see secrets
+// node, python, ruby -> cannot see secrets
+```
+
+#### Option 5: Command Pattern Rules Engine
+```typescript
+// Bun server maintains rules for what commands get secrets
+const PLATFORM_COMMANDS = [
+  /^aws\s+/,
+  /^gcloud\s+/,
+  /^npm\s+publish/,
+  /^docker\s+push/,
+  /^terraform\s+/
+];
+
+// Every process spawn goes through our wrapper
+// Wrapper checks command against rules
+// Injects or strips environment accordingly
+```
+
+#### Option 6: Explicit Secret Request Protocol
+```typescript
+// Claude must explicitly request secrets for each command
+// Via a special file or socket
+
+// Claude writes to /tmp/secret-request.json:
+{
+  "command": "aws s3 ls",
+  "reason": "deploying user application",
+  "secrets_needed": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]
+}
+
+// Bun server approves/denies and executes accordingly
+```
+
+#### Option 7: Time-boxed Secret Windows
+```typescript
+// Platform developer explicitly opens a "secret window"
+await sandbox.openSecretWindow(30000); // 30 seconds
+// During this time, ALL commands have access to secrets
+
+await sandbox.exec('aws s3 sync . s3://bucket/');
+await sandbox.exec('aws ecs update-service ...');
+
+await sandbox.closeSecretWindow();
+// After this, no commands have secrets
+```
+
+### Proposed Solution Architecture (Recommended)
+
+After analyzing all options, the most practical solution combines several approaches:
+
+1. **Default Claude Without Secrets**: Start Claude Code WITHOUT platform secrets initially
+2. **Explicit Secret Injection**: Platform developer controls when secrets are available
+3. **Wrapper Binary for Clarity**: Provide `with-secrets` command for explicit secret operations
+4. **Callback Mechanism**: Allow container to request secrets from Worker when needed
 
 ```typescript
-// The API makes the boundary explicit
-await sandbox.exec('node app.js');  // NEVER has secrets
-await sandbox.execWithSecrets('aws s3 ls', { env });  // ONLY has specified secrets
+// Solution: Claude starts WITHOUT secrets
+const claude = await sandbox.startProcess('claude -p "deploy my app"');
 
-// Even if Claude Code has secrets in its process:
-const claude = await sandbox.startProcessWithSecrets('claude', { env: allSecrets });
+// Claude can request platform operations via special command
+// Inside Claude's execution:
+// $ request-platform-op "aws s3 ls"
+// This calls back to Worker, which executes with secrets
 
-// The code it generates and runs won't inherit them:
-// Inside Claude's execution, when it runs: exec('node app.js')
-// That subprocess won't see the secrets
+// Or using wrapper:
+// $ with-platform-auth aws s3 ls
+// Wrapper requests secrets from Worker before executing
 ```
+
+This gives platform developers full control while allowing Claude to perform necessary operations.
 
 ## Executive Summary
 
