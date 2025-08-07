@@ -741,18 +741,169 @@ class PlatformWorker {
 2. Implement Platform SDK
 3. Add advanced security features
 
+## Platform Research Findings
+
+### Key Discoveries from Cloudflare Architecture
+
+#### 1. Container Class Architecture
+The `@cloudflare/containers` package provides:
+- Base `Container` class that extends `DurableObject`
+- Automatic container lifecycle management
+- Built-in environment variable support via `envVars` property
+- Container runs in separate process, all env vars inherited
+
+#### 2. RPC Capabilities
+**Critical Finding**: Cloudflare RPC supports passing **functions as parameters**!
+- Functions can be passed from Worker to Durable Object
+- The DO can call back to the Worker through these functions
+- This enables true bidirectional communication
+- RpcTarget class enables returning objects with methods
+
+#### 3. Communication Patterns
+- **E-order semantics**: Calls to same DO are guaranteed ordered
+- **Promise pipelining**: Can chain calls without awaits for efficiency
+- **Stub management**: Each stub maintains its own connection
+- **Functions as callbacks**: DO can invoke Worker functions passed as params
+
+### Architectural Implications for Our Solution
+
+#### Perfect Fit: Platform Operations Proxy
+The RPC callback capability makes our recommended solution viable:
+
+```typescript
+// Worker - holds secrets
+class PlatformWorker {
+  async fetch(request, env) {
+    const sandbox = getSandbox(env.Sandbox, "user-sandbox");
+    
+    // Pass a callback function to the DO!
+    await sandbox.registerPlatformCallback(async (operation, params) => {
+      // This runs in the Worker, with access to secrets!
+      switch(operation) {
+        case 'fetch-template':
+          return await env.R2.get(`templates/${params.id}`);
+        case 'db-query':
+          return await env.DB.prepare(params.query).run();
+      }
+    });
+    
+    // User code runs without access to secrets
+    await sandbox.exec("npm start");
+  }
+}
+
+// Durable Object - no secrets
+class SecureSandbox extends Container {
+  private platformCallback?: Function;
+  
+  async registerPlatformCallback(callback: Function) {
+    this.platformCallback = callback;
+  }
+  
+  async executePlatformOp(op: string, params: any) {
+    if (!this.platformCallback) {
+      throw new Error("No platform callback registered");
+    }
+    // Call back to the Worker!
+    return await this.platformCallback(op, params);
+  }
+}
+```
+
+### Container Environment Variables Flow
+
+```
+Worker.setEnvVars() 
+  → Sandbox.envVars (DO property)
+  → Container.envVars (inherited from DO)
+  → process.env (in container)
+  → All spawned processes inherit
+```
+
+The Container class directly sets environment variables that become part of `process.env`, making isolation within the container impossible without modifying the container implementation.
+
+### Why Other Approaches Won't Work
+
+1. **Dual Contexts Within Container**: Would require modifying container handler code
+2. **Secret Service**: Still exposes secrets temporarily in container env
+3. **Capability-Based**: Would need container changes for enforcement
+
+### Performance Considerations
+
+- RPC round-trip: ~5-10ms (acceptable for platform operations)
+- Function callbacks add minimal overhead
+- Can batch operations to reduce round trips
+- Promise pipelining can optimize sequential calls
+
+## Updated Implementation Plan
+
+### Phase 1: POC with RPC Callbacks
+```typescript
+// 1. Extend Sandbox to support platform callbacks
+class SecureSandbox extends Container {
+  private platformOps?: PlatformOperations;
+  
+  async setPlatformOperations(ops: PlatformOperations) {
+    this.platformOps = ops;
+  }
+  
+  // Internal method for platform SDK
+  protected async callPlatform(op: string, params: any) {
+    if (!this.platformOps) throw new Error("Platform not initialized");
+    return await this.platformOps.execute(op, params);
+  }
+}
+
+// 2. Platform Operations interface
+interface PlatformOperations {
+  execute(operation: string, params: any): Promise<any>;
+}
+
+// 3. Worker implementation
+const sandbox = getSandbox(env.Sandbox, userId);
+await sandbox.setPlatformOperations({
+  async execute(op, params) {
+    // Access secrets here in Worker context
+    switch(op) {
+      case 'r2-fetch':
+        return await env.R2.get(params.key);
+    }
+  }
+});
+```
+
+### Phase 2: User-Friendly API
+```typescript
+// Wrap complex operations in simple methods
+class SecureSandbox extends Container {
+  async fetchTemplate(templateId: string) {
+    return this.callPlatform('fetch-template', { templateId });
+  }
+  
+  async saveProject(data: ProjectData) {
+    return this.callPlatform('save-project', { data });
+  }
+}
+```
+
+### Phase 3: Security Hardening
+- Add operation whitelisting
+- Implement rate limiting
+- Add audit logging
+- Validate all parameters
+
 ## Next Steps
 
 1. ✅ Understand the SDK's internal architecture 
 2. ✅ Analyze current implementation security gaps
 3. ✅ Document edge cases and considerations
-4. **TODO**: Build POC of Platform Operations Proxy pattern
-5. **TODO**: Test performance impact of RPC callbacks
-6. **TODO**: Design detailed API with TypeScript types
-7. **TODO**: Create security test suite
-8. **TODO**: Write migration guide for existing users
-9. **TODO**: Get feedback from security team
-10. **TODO**: Plan rollout strategy
+4. ✅ Research platform capabilities and RPC patterns
+5. **NOW**: Build POC with RPC callbacks
+6. **TODO**: Test performance impact of RPC callbacks
+7. **TODO**: Design detailed TypeScript API
+8. **TODO**: Create security test suite
+9. **TODO**: Write migration guide
+10. **TODO**: Get feedback and iterate
 
 ## Concrete Example: AI Code Generation Platform
 
