@@ -2,13 +2,13 @@
 
 ## Executive Summary
 
-The Cloudflare Sandbox SDK currently has a critical security vulnerability where platform-level secrets (API keys, database credentials, etc.) set via `setEnvVars()` are accessible to all user code running in the sandbox. This document analyzes the vulnerability, explores solutions, and recommends a phased approach to fix it.
+The Cloudflare Sandbox SDK currently has a critical security vulnerability where platform-level secrets (API keys, database credentials, etc.) set via `setEnvVars()` are accessible to all user code running in the sandbox. Through extensive testing, we discovered that production environments already have all necessary Linux capabilities to implement complete isolation.
 
-**Key Finding**: Any environment variable set through `setEnvVars()` becomes accessible to ALL code executed in the container, including user-generated code, AI-generated code, and third-party dependencies.
+**Critical Discovery**: Production Cloudflare Containers have full Linux capabilities including CAP_SYS_ADMIN, enabling us to build namespace-based isolation TODAY without platform changes.
 
-**Critical Insight**: We control the container's bun server (control plane), which opens up powerful mitigation strategies like in-memory credential vaults and isolated execution contexts.
+**The Vulnerability**: Any environment variable set through `setEnvVars()` becomes accessible to ALL code executed in the container - user code, AI-generated code, and third-party dependencies can all read platform secrets.
 
-**Recommended Solution**: Production environments already have the necessary Linux capabilities (CAP_SYS_ADMIN) to implement complete isolation. We can build namespace-based isolation today without waiting for platform changes.
+**The Solution**: Using production's CAP_SYS_ADMIN capability, we can create isolated namespaces where platform operations run with credentials completely invisible to user code. This provides kernel-enforced security boundaries.
 
 ## Problem Statement
 
@@ -341,7 +341,7 @@ class CredentialVault {
 - Child processes inherit credentials
 - Vulnerable to timing attacks
 
-## Alternative Approaches Considered
+## Alternative Approaches Considered (Before Discovery)
 
 ### 1. LD_PRELOAD Injection
 ```c
@@ -353,7 +353,7 @@ char* getenv(const char* name) {
   return original_getenv(name);
 }
 ```
-**Verdict:** Complex, can be bypassed by static linking
+**Verdict:** Complex, can be bypassed by static linking. No longer needed with namespace isolation.
 
 ### 2. FUSE Virtual Filesystem
 ```typescript
@@ -362,14 +362,14 @@ fuseMount('~/.aws/credentials', {
   read: (pid) => isAuthorized(pid) ? getCredentials() : ""
 });
 ```
-**Verdict:** Requires privileges we don't have
+**Verdict:** We thought we lacked privileges, but with CAP_SYS_ADMIN we could actually do this.
 
 ### 3. Sidecar Credential Service
 ```typescript
 // Separate process holds credentials, accessed via socket
 const creds = await fetch('http://unix:/tmp/creds.sock/aws-key');
 ```
-**Verdict:** Requires wrapping every CLI tool
+**Verdict:** Requires wrapping every CLI tool. Namespaces provide better isolation.
 
 ### 4. Time-Based Credential Files
 ```typescript
@@ -377,18 +377,31 @@ const creds = await fetch('http://unix:/tmp/creds.sock/aws-key');
 await writeFile(credFile, creds, { mode: 0o600 });
 setTimeout(() => unlink(credFile), 100); // Delete after 100ms
 ```
-**Verdict:** Race conditions, still readable briefly
+**Verdict:** Race conditions, still readable briefly. Namespaces eliminate the window entirely.
 
 
 
 
 ## Migration Path
 
-1. **Deprecation Warning**: Add warning to `setEnvVars()` when used with sensitive-looking keys
-2. **New Methods**: Introduce `setPlatformSecrets()` and `setUserEnvVars()`
-3. **Documentation**: Update all examples to use secure patterns
-4. **Compatibility Mode**: Support both patterns during transition
-5. **Breaking Change**: Eventually remove ability to set secrets via `setEnvVars()`
+### Phase 1: Immediate (Week 1)
+1. **Build namespace isolation POC** using production CAP_SYS_ADMIN
+2. **Test with real credentials** in isolated namespaces
+3. **Document the new security model** for early adopters
+
+### Phase 2: SDK Enhancement (Week 2-3)  
+1. **Add deprecation warning** to `setEnvVars()` for sensitive-looking keys
+2. **Introduce new secure methods**:
+   - `execInIsolation()` - Run commands in isolated namespace with credentials
+   - `setUserEnvVars()` - Safe environment variables for user code
+   - `registerPlatformCallback()` - RPC callbacks for platform operations
+3. **Update all examples** to use secure patterns
+
+### Phase 3: General Availability (Week 4+)
+1. **Release updated SDK** with namespace isolation
+2. **Compatibility mode** - Support both patterns during transition
+3. **Migration guide** with step-by-step instructions
+4. **Breaking change** (3-6 months) - Remove insecure `setEnvVars()` for secrets
 
 ## Security Checklist
 
@@ -548,25 +561,46 @@ async setPlatformConfig(config: PlatformConfig) {
 
 ### Testing Strategy
 
-#### Security Test Suite
+#### Security Test Suite (Updated for Namespace Isolation)
 ```typescript
-describe('Environment Variable Security', () => {
-  test('User code cannot access platform secrets', async () => {
-    await sandbox.setPlatformSecrets({ API_KEY: 'secret' });
-    const result = await sandbox.exec('echo $API_KEY');
-    expect(result.stdout).not.toContain('secret');
+describe('Namespace-Based Security', () => {
+  test('Isolated namespace cannot access platform secrets', async () => {
+    // Run platform operation with credentials in isolated namespace
+    const platformResult = await sandbox.execInIsolation(
+      'aws s3 ls', 
+      { AWS_ACCESS_KEY_ID: 'secret-key' }
+    );
+    
+    // User code in main namespace cannot see credentials
+    const userResult = await sandbox.exec('echo $AWS_ACCESS_KEY_ID');
+    expect(userResult.stdout).toBe('');
+    
+    // User code cannot see platform process
+    const ps = await sandbox.exec('ps aux | grep aws');
+    expect(ps.stdout).not.toContain('aws s3 ls');
   });
   
-  test('Platform operations can use secrets', async () => {
-    await sandbox.setPlatformSecrets({ R2_KEY: 'secret' });
-    const result = await sandbox.platformExec('fetch-template', { id: 'test' });
-    expect(result.success).toBe(true);
+  test('Cross-namespace /proc access is blocked', async () => {
+    const isolated = await sandbox.execInIsolation(
+      'sleep 30',
+      { SECRET: 'platform-secret' }
+    );
+    
+    // Try to read from main namespace
+    const steal = await sandbox.exec(`cat /proc/${isolated.pid}/environ`);
+    expect(steal.exitCode).not.toBe(0); // Should fail - different namespace
   });
   
-  test('Transitive access is blocked', async () => {
-    await sandbox.setPlatformSecrets({ SECRET: 'value' });
+  test('Package installations cannot access isolated credentials', async () => {
+    // Platform operations in isolated namespace
+    await sandbox.execInIsolation(
+      'npm run deploy',
+      { DEPLOY_KEY: 'secret' }
+    );
+    
+    // Malicious package in user namespace
     await sandbox.exec('npm install malicious-package');
-    // Verify postinstall scripts didn't access SECRET
+    // Package cannot access DEPLOY_KEY - different namespace
   });
 });
 ```
@@ -725,27 +759,30 @@ class DeploymentService {
 }
 ```
 
-## Recommendations Summary
+## Recommendations Summary (Updated with Production Capabilities)
 
-### Immediate (Today)
-1. **Document the limitation clearly** - CLI tools need real credentials
-2. **Provide secure patterns** for common operations
-3. **Warn developers** about the security trade-offs
+### Immediate (This Week) - We Can Build Today!
+1. **Implement namespace isolation** using production CAP_SYS_ADMIN
+2. **Create secure execution API** in bun server for isolated commands
+3. **Build credential vault** that never touches global environment
+4. **Test with real AWS/GCP deployments** in production
 
-### Short Term (1-2 weeks)
-1. Create **tool-specific wrappers** that minimize exposure
-2. Implement **credential rotation** for temporary access
-3. Build **allowlist of safe CLI operations**
+### Short Term (Next 2 Weeks)
+1. **Formalize SDK API** for namespace operations
+2. **Add cgroup isolation** using available v2 delegation
+3. **Create migration tools** for existing users
+4. **Document security best practices**
 
-### Medium Term (1-2 months)
-1. Develop **separate deployment service** pattern
-2. Create **SDK alternatives** for common CLI operations
-3. Implement **audit logging** for all credential usage
+### Medium Term (Month 2)
+1. **Release production-ready SDK** with full isolation
+2. **Build RPC callback system** for platform operations
+3. **Add comprehensive audit logging**
+4. **Create example implementations** for common platforms
 
-### Long Term (3-6 months)
-1. Work with Cloudflare to add **process-level isolation**
-2. Investigate **kernel namespaces** for credential isolation
-3. Build **credential proxy daemon** that mediates access
+### No Longer Needed (We Have Capabilities!)
+1. ~~Request CAP_SYS_ADMIN from Cloudflare~~ ✅ Already available
+2. ~~Wait for platform changes~~ ✅ Can build today
+3. ~~Investigate workarounds~~ ✅ Have proper solution
 
 ## Platform Research Findings
 
@@ -943,7 +980,7 @@ Testing confirmed that with the current SDK implementation:
 - Python and Node.js subprocesses inherit all environment variables
 - Cross-process credential theft is trivial
 
-## What We Can Build Today (With Production Capabilities)
+## What We Can Build Today in Production
 
 ### Understanding the Architecture Layers
 
@@ -962,7 +999,7 @@ Testing confirmed that with the current SDK implementation:
 │   └──────────────────────┘          │
 ├─────────────────────────────────────┤
 │      Container Runtime              │ <- CLOUDFLARE CONTROLS (gVisor/Firecracker)
-│   (Security policies, capabilities) │    This is where we need changes!
+│   (Security policies, capabilities) │    Production has everything we need!
 ├─────────────────────────────────────┤
 │              VM (KVM)               │ <- Cloudflare controls
 ├─────────────────────────────────────┤
@@ -970,31 +1007,31 @@ Testing confirmed that with the current SDK implementation:
 └─────────────────────────────────────┘
 ```
 
-### The Fundamental Limitation
+### Update: No Fundamental Limitation in Production!
 
-Even though we control the Dockerfile and can install any software, **Cloudflare's container runtime restricts what our container can actually do**. We're effectively "root" but without dangerous capabilities:
+Our testing revealed a critical difference between local and production environments:
 
 ```bash
-# Inside our container today:
-$ whoami
-root  # We appear to be root
-
+# Local Development (Restricted for safety):
 $ capsh --print
-Current capabilities:  # But we're missing critical ones!
 Bounding set = cap_chown,cap_net_bind_service,...
-# MISSING: cap_sys_admin, cap_sys_ptrace, cap_sys_module
+# MISSING: cap_sys_admin - Can't create namespaces locally
 
-# This means we CAN'T do:
-$ unshare --pid --fork  # Create new namespace
-unshare: unshare failed: Operation not permitted  # ❌ No CAP_SYS_ADMIN!
+# Production (Full capabilities!):
+$ cat /proc/self/status | grep Cap
+CapEff: 000001ffffffffff  # ALL capabilities including CAP_SYS_ADMIN!
 
-# ANY process can still steal credentials:
-for pid in /proc/*/; do
-  cat $pid/environ | grep AWS_ACCESS_KEY  # Works! User code can see AI agent's env
-done
+$ unshare --pid --fork echo "SUCCESS"
+SUCCESS  # ✅ Works in production!
+
+# We CAN create isolated namespaces in production:
+$ unshare --pid --mount --net --fork /bin/bash
+# Now in isolated namespace - user code can't see us!
 ```
 
-### Platform Enhancements Needed (Priority Order)
+**Key Insight**: Production has everything we need for complete isolation. Local development is intentionally restricted for developer safety.
+
+### Linux Security Primitives Explained (Already Available in Production!)
 
 #### 1. CAP_SYS_ADMIN - "The Namespace Creator"
 
@@ -1054,7 +1091,7 @@ async function runAIAgentSecurely() {
 }
 ```
 
-**Why We Need It:** Without CAP_SYS_ADMIN, we cannot create isolated execution contexts. All processes share the same namespace and can see each other's environment variables.
+**Status in Production:** ✅ AVAILABLE - We can create isolated namespaces today!
 
 #### 2. Seccomp Filters - "The System Call Police"
 
@@ -1121,7 +1158,7 @@ const seccompRules = {
 };
 ```
 
-**Why We Need It:** Default seccomp profiles allow reading `/proc/*/environ`, enabling credential theft. We need custom filters to block cross-process environment access.
+**Status in Production:** Seccomp is disabled (mode 0), but with namespace isolation this is less critical. Processes in different namespaces can't see each other anyway.
 
 #### 3. cgroups v2 Delegation - "The Resource Manager"
 
@@ -1198,13 +1235,13 @@ class CGroupIsolation {
 }
 ```
 
-**Why We Need It:** cgroups v2 with delegation would let us create truly isolated groups where platform code (AI agent) and user code cannot see each other.
+**Status in Production:** ✅ AVAILABLE - cgroups v2 with delegation is enabled!
 
 #### 4. Linux User Namespaces - "The Identity Switcher"
 
 **What it is:** Allows mapping users in the container to different users in the namespace.
 
-**Why We Need It:** Could run AI agent as "root" while user code runs as "nobody", with kernel-enforced permission boundaries.
+**Status in Production:** ✅ AVAILABLE - User namespaces work in production!
 
 ### Production Reality vs Local Development
 
@@ -1267,64 +1304,87 @@ Local development intentionally restricts capabilities for safety, preventing de
 
 ## Implementation Roadmap
 
-### Phase 1: Immediate Implementation (Production Ready Today)
+### Phase 1: Proof of Concept (This Week)
 
-Since production environments have CAP_SYS_ADMIN and all necessary capabilities, we can implement complete isolation immediately:
+Build and test namespace isolation using production's CAP_SYS_ADMIN:
 
-1. **Namespace-Based Isolation**
-   - Use `unshare` to create isolated PID/mount/network namespaces
-   - Platform code runs in separate namespace with credentials
-   - User code runs in clean namespace without access
-   
-2. **Secure Execution API**
+1. **Core Namespace Implementation**
    ```typescript
-   // This will work in production today
-   async execInNamespace(command: string, credentials: Record<string, string>) {
+   // Add to bun server (container_src/index.ts)
+   async function execInIsolation(
+     command: string, 
+     credentials: Record<string, string>,
+     options?: { timeout?: number }
+   ) {
+     // Create isolated namespace with credentials
      const child = spawn('unshare', [
-       '--pid', '--mount', '--fork',
+       '--pid',    // Separate process namespace
+       '--mount',  // Separate filesystem view
+       '--fork',   // Fork before exec
        'sh', '-c', command
      ], {
-       env: { ...cleanEnv, ...credentials }
+       env: { ...minimalEnv(), ...credentials },
+       timeout: options?.timeout || 60000
      });
-     // User code cannot see this process or its environment
-     return child;
+     
+     // Process invisible to main namespace
+     return await collectOutput(child);
    }
    ```
 
-3. **Process Hiding via PID Namespaces**
-   - Platform processes invisible to user code
-   - Complete `/proc` isolation between namespaces
-   - No cross-namespace environment reading possible
+2. **SDK Interface Design**
+   ```typescript
+   // New secure methods for platform developers
+   interface SecureSandbox extends Sandbox {
+     // Execute with isolated credentials
+     execInIsolation(cmd: string, creds: Record<string, string>): Promise<ExecResult>;
+     
+     // Safe env vars for user code  
+     setUserEnvVars(vars: Record<string, string>): Promise<void>;
+     
+     // Platform operations via RPC callback
+     registerPlatformCallback(callback: Function): Promise<void>;
+   }
+   ```
 
-### Phase 2: SDK Enhancement (1-2 Weeks)
+3. **Testing in Production**
+   - Deploy test worker with namespace isolation
+   - Verify credential isolation with real AWS/GCP tools
+   - Confirm process invisibility across namespaces
 
-1. **Formalize Namespace API**
-   - `createIsolatedContext()` for platform operations
-   - `execInPlatformNamespace()` for privileged commands
-   - `execInUserNamespace()` for user code
+### Phase 2: Production Ready (Week 2-3)
 
-2. **Cgroup Integration**
-   - Use available cgroup v2 delegation
-   - Create resource limits per namespace
-   - Monitor resource usage
+1. **Harden Implementation**
+   - Add cgroup isolation for resource limits
+   - Implement audit logging for credential access
+   - Create credential rotation mechanism
+   
+2. **Developer Experience**
+   - Detect capabilities and provide appropriate warnings
+   - Clear error messages when isolation fails
+   - Automatic fallback for local development
 
-3. **Testing and Documentation**
-   - Comprehensive security test suite
-   - Migration guide for existing users
-   - Best practices documentation
+3. **Documentation & Examples**
+   - Complete API documentation
+   - Migration guide from `setEnvVars()`
+   - Example implementations for AWS, GCP, database deployments
 
-### Phase 3: Local Development Support (Optional)
+### Phase 3: General Release (Week 4+)
 
-Since local development environments don't have CAP_SYS_ADMIN:
+1. **SDK Release**
+   - Publish updated @cloudflare/sandbox package
+   - Deprecation warnings for insecure patterns
+   - Backward compatibility during transition
 
-1. **Fallback Mode**
-   - Detect capabilities at runtime
-   - Use namespace isolation in production
-   - Fall back to credential vault in development
+2. **Community Support**
+   - Blog post explaining the security improvement
+   - Video tutorials for migration
+   - Support channels for questions
 
-2. **Development Warning System**
-   - Alert developers about security differences
-   - Provide clear documentation about production behavior
+3. **Long-term Maintenance**
+   - Monitor for security issues
+   - Performance optimizations
+   - Feature requests from users
 
 ## Security Analysis Summary
 
@@ -1338,7 +1398,7 @@ Since local development environments don't have CAP_SYS_ADMIN:
 - **Exposure:** Milliseconds to seconds
 - **Risk:** Medium - timing attacks possible
 
-### With Platform Support (Future State)
+### With Namespace Isolation (Available Today in Production!)
 - **Vulnerability:** None - complete isolation
 - **Exposure:** Zero - different namespaces
 - **Risk:** Low - kernel-enforced boundaries
@@ -1347,7 +1407,7 @@ Since local development environments don't have CAP_SYS_ADMIN:
 
 ### Scenario: AI Agent Needs to Deploy to AWS
 
-#### What Happens Today (No Isolation)
+#### Current State (Without Our Solution)
 ```python
 # ai_agent.py running in container
 import os
@@ -1380,22 +1440,22 @@ $ gdb -p 1234
 (gdb) dump memory  # Can read AI agent's memory!
 ```
 
-#### What We Could Do With Platform Support
+#### What We're Building Today (With Namespace Isolation)
 ```python
-# ai_agent.py running in isolated namespace
+# ai_agent.py running in isolated namespace (via our SDK)
 import os
 import subprocess
 
 def deploy_lambda():
-    # Credentials exist ONLY in AI agent's namespace
-    # User code literally cannot see them
+    # SDK ensures this runs in isolated namespace with credentials
+    # Credentials exist ONLY in this namespace
     result = subprocess.run(['aws', 'lambda', 'deploy'])
     # Result: SUCCESS!
     
-    # Meanwhile, user code in different namespace:
-    # print(os.environ.get('AWS_ACCESS_KEY_ID'))  # None
-    # subprocess.run(['cat', '/proc/1234/environ'])  # Permission denied
-    # subprocess.run(['ps', 'aux'])  # Doesn't even see AI agent!
+    # Meanwhile, user code in main namespace:
+    # print(os.environ.get('AWS_ACCESS_KEY_ID'))  # None - not visible
+    # subprocess.run(['cat', '/proc/1234/environ'])  # No such process
+    # subprocess.run(['ps', 'aux'])  # Doesn't see isolated namespace!
 ```
 
 **With Proper Isolation:**
@@ -1417,7 +1477,7 @@ gdb: No such process  # Can't debug what you can't see!
 
 ### The Difference in Security Models
 
-#### Today: Time-Based Security (Best We Can Do)
+#### Without Our Solution: Time-Based Security
 ```typescript
 // Brief exposure window - credentials visible for seconds
 async function deployWithTempCreds() {
@@ -1431,45 +1491,44 @@ async function deployWithTempCreds() {
 }
 ```
 
-#### Tomorrow: Isolation-Based Security (What We Need)
+#### Our Solution Today: Namespace-Based Isolation (Production Ready)
 ```typescript
-// Complete isolation - credentials never visible to user code
+// Complete isolation using production CAP_SYS_ADMIN
 async function deployWithIsolation() {
-  await sandbox.runInNamespace('platform', async () => {
-    // Only exists in platform namespace
-    process.env.AWS_KEY = secret;
-    await exec('aws lambda deploy');
-  });
+  // New SDK method that uses namespace isolation
+  await sandbox.execInIsolation(
+    'aws lambda deploy',
+    { AWS_ACCESS_KEY_ID: secret, AWS_SECRET_ACCESS_KEY: secretKey },
+    { timeout: 30000 }
+  );
   
   // User code at ANY time:
-  await sandbox.exec('echo $AWS_KEY');  // undefined
-  await sandbox.exec('ps aux | grep aws');  // No results
+  await sandbox.exec('echo $AWS_ACCESS_KEY_ID');  // Empty - never set in main namespace
+  await sandbox.exec('ps aux | grep aws');  // No results - different PID namespace
+  await sandbox.exec('cat /proc/*/environ | grep AWS');  // Nothing - isolated
 }
 ```
 
 ## The Bottom Line
 
-**Today:** We can achieve "good enough" security with our container control:
-- In-memory credential vault
-- Just-in-time injection  
-- Process hiding (limited)
-- Audit logging
-- **Risk**: Brief exposure windows (seconds)
+**Current State (Vulnerable):**
+- Persistent credential exposure (hours/days) ❌
+- Any code can read platform secrets
+- No isolation between platform and user code
+- **Risk**: Critical - credentials easily stolen
 
-**Tomorrow:** With platform support, we can achieve "bank-grade" security:
-- Complete process isolation
-- Kernel-enforced boundaries
-- No exposure window
-- **Risk**: Near zero
+**What We Can Build Today (Production):**
+- Complete namespace isolation ✅
+- Kernel-enforced security boundaries
+- Zero exposure to user code
+- Platform operations in separate namespace
+- **Risk**: Near zero - proper isolation
 
-**Key Insight:** 
-- Current state: Persistent exposure (hours/days) ❌
-- Our solution: Brief exposure (seconds) ⚠️
-- With platform support: No exposure (isolated) ✅
-
-Time-based security (brief exposure) << Isolation-based security (no exposure)
-
-But time-based security >> Current state (persistent exposure)
+**Key Insights:**
+1. Production has CAP_SYS_ADMIN - we can build proper isolation TODAY
+2. No need to wait for platform changes
+3. Local development is restricted for safety, production has full capabilities
+4. Namespace isolation > Time-based security > Current persistent exposure
 
 ## Concrete Example: AI Code Generation Platform
 
@@ -1627,6 +1686,126 @@ containers:
 3. Document patterns for secure credential management
 4. Test with real-world deployment scenarios
 5. Create migration guide for existing users
+
+## Final API Design Considerations
+
+### Why Two Contexts Instead of Per-Command Isolation?
+
+We considered making isolation per-command:
+```typescript
+// Option 1: Per-command (what we considered)
+await sandbox.execWithSecrets('aws s3 ls', { AWS_KEY: secret });
+await sandbox.exec('python app.py');  // No secrets
+
+// Option 2: Two contexts (what we chose)
+await sandbox.platform.exec('aws s3 ls', { env: { AWS_KEY: secret }});
+await sandbox.user.exec('python app.py');
+```
+
+We chose two contexts because:
+1. **Mental Model**: Clear separation between platform and user operations
+2. **Performance**: Can reuse namespaces for multiple platform operations
+3. **State Management**: Platform operations can share state within their namespace
+4. **Developer Experience**: Explicit about what has access to secrets
+
+### Implementation Priority Order
+
+1. **Core Namespace Isolation** (Week 1)
+   - Basic `unshare` implementation in bun server
+   - Separate platform/user execution paths
+   - Test with real AWS CLI
+
+2. **File System Sharing** (Week 1)
+   - Shared directory mounting between namespaces
+   - Ensure `/app` is accessible to both contexts
+   - Handle file permissions correctly
+
+3. **Process Management** (Week 2)
+   - Track processes per namespace
+   - Clean shutdown of namespace processes
+   - Handle orphaned processes
+
+4. **Developer Experience** (Week 2)
+   - Clear error messages
+   - Capability detection
+   - Local development fallback
+
+5. **Performance Optimization** (Week 3)
+   - Namespace pooling/reuse
+   - Lazy namespace creation
+   - Benchmark overhead
+
+### Edge Cases to Handle
+
+1. **Large File Operations**
+   ```typescript
+   // Platform generates large file
+   await sandbox.platform.exec('terraform plan -out=plan.tfplan');
+   // User needs to read it - shared filesystem critical
+   await sandbox.user.exec('terraform show plan.tfplan');
+   ```
+
+2. **Interactive Commands**
+   ```typescript
+   // Some tools need stdin
+   await sandbox.platform.exec('aws configure', {
+     stdin: `${key}\n${secret}\n${region}\ntext\n`
+   });
+   ```
+
+3. **Long-Running Processes**
+   ```typescript
+   // Database tunnel needs to stay open
+   const tunnel = await sandbox.platform.startProcess('ssh -L 5432:db:5432 bastion');
+   // Multiple operations through tunnel
+   await sandbox.platform.exec('psql -h localhost -p 5432');
+   ```
+
+4. **Cross-Context Communication**
+   ```typescript
+   // Platform generates, user consumes
+   await sandbox.platform.exec('aws s3 cp s3://bucket/data.json /shared/data.json');
+   await sandbox.user.exec('python analyze.py /shared/data.json');
+   ```
+
+### Security Considerations
+
+1. **Namespace Escape**: Even with namespaces, monitor for kernel vulnerabilities
+2. **Shared Filesystem**: Careful with permissions on shared directories
+3. **Resource Limits**: Apply cgroup limits to prevent DoS
+4. **Audit Logging**: Track all platform operations with credentials
+
+### Alternative API Designs We Considered
+
+#### Design 1: Explicit Namespace Management
+```typescript
+const platform = await sandbox.createNamespace('platform');
+await platform.exec('aws s3 ls', { env: secrets });
+await platform.destroy();
+```
+**Rejected**: Too complex for developers
+
+#### Design 2: Role-Based Execution
+```typescript
+await sandbox.exec('aws s3 ls', { role: 'platform', env: secrets });
+await sandbox.exec('python app.py', { role: 'user' });
+```
+**Rejected**: Not clear enough about isolation
+
+#### Design 3: Capability Tokens
+```typescript
+const token = await sandbox.createCapabilityToken(['aws:*']);
+await sandbox.exec('aws s3 ls', { token });
+```
+**Rejected**: Doesn't work with existing CLI tools
+
+### What Success Looks Like
+
+1. **Security**: Zero credential leaks in production
+2. **Compatibility**: AWS CLI, terraform, kubectl all work
+3. **Performance**: <10ms overhead for platform operations
+4. **Developer Experience**: Migration takes <1 hour
+5. **Reliability**: No crashes or hangs from namespace operations
 
 ---
 
