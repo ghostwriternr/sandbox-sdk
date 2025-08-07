@@ -18,9 +18,15 @@ export default {
     try {
       // Quick health check
       if (path === "/") {
-        return new Response("Security Test Worker Ready! Try /test-capabilities or /test-isolation", {
-          headers: { "content-type": "text/plain" }
-        });
+        return new Response(
+          "Security Test Worker Ready!\n\n" +
+          "Available tests:\n" +
+          "  /test-capabilities - Check Linux capabilities\n" +
+          "  /test-isolation - Test current credential isolation\n" +
+          "  /test-processes - Test process visibility\n" +
+          "  /test-comprehensive - Complete security validation (current + future)\n",
+          { headers: { "content-type": "text/plain" } }
+        );
       }
 
       // Test 1: Container Capabilities
@@ -268,9 +274,298 @@ try {
         });
       }
 
-      return new Response("Unknown path. Try: /test-capabilities, /test-isolation, or /test-processes", { 
-        status: 404 
-      });
+      // Test 4: Comprehensive Isolation Test (Current + Future)
+      if (path === "/test-namespace-isolation" || path === "/test-comprehensive") {
+        console.log("🔒 Testing Comprehensive Security Isolation...\n");
+        
+        const tests = [];
+        const sandbox = getSandbox(env.Sandbox, "comprehensive-test-" + Date.now());
+        
+        // Check implementation status
+        const hasNewMethods = 
+          typeof sandbox.execWithSecrets === 'function' &&
+          typeof sandbox.startProcessWithSecrets === 'function';
+        
+        tests.push({
+          test: "Implementation Status",
+          result: hasNewMethods ? "✅ v2.0 (Namespace Isolation)" : "⚠️ v1.x (Current - Vulnerable)",
+          hasNewMethods
+        });
+        
+        // Always test current vulnerability first
+        console.log("Testing current security state...\n");
+        
+        // Test current setEnvVars vulnerability
+        if (typeof sandbox.setEnvVars === 'function') {
+          try {
+            await sandbox.setEnvVars({
+              CURRENT_TEST_SECRET: 'EXPOSED_SECRET_123',
+              AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE'
+            });
+            
+            const checkExposure = await sandbox.exec('echo $CURRENT_TEST_SECRET');
+            tests.push({
+              test: "Current: setEnvVars() exposure",
+              result: checkExposure.stdout.includes('EXPOSED_SECRET') 
+                ? "❌ VULNERABLE (secrets exposed to all code)" 
+                : "✅ Protected",
+              isVulnerable: checkExposure.stdout.includes('EXPOSED_SECRET')
+            });
+          } catch (error: any) {
+            tests.push({
+              test: "Current: setEnvVars() exposure",
+              result: "✅ Method removed (good!)",
+              error: error.message
+            });
+          }
+        }
+        
+        // If new methods exist, test them
+        if (hasNewMethods) {
+          console.log("Testing v2.0 namespace isolation...\n");
+        
+        // Test 1: Basic isolation - secrets not visible across namespaces
+        try {
+          // Execute with secrets in isolated namespace
+          const isolatedResult = await sandbox.execWithSecrets(
+            'echo "KEY=$TEST_SECRET_KEY"',
+            {
+              env: {
+                TEST_SECRET_KEY: 'SUPER_SECRET_VALUE_12345',
+                AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE'
+              }
+            }
+          );
+          
+          tests.push({
+            test: "Isolated execution with secrets",
+            result: isolatedResult.isolated ? "✅ Ran in isolated namespace" : "❌ Not isolated",
+            output: isolatedResult.stdout.trim()
+          });
+          
+          // Try to access from main namespace
+          const mainResult = await sandbox.exec('echo "KEY=$TEST_SECRET_KEY"');
+          tests.push({
+            test: "Main namespace cannot see secrets",
+            result: mainResult.stdout.includes('SUPER_SECRET') ? "❌ LEAKED!" : "✅ PROTECTED",
+            output: mainResult.stdout.trim() || "(empty - good!)"
+          });
+        } catch (error: any) {
+          tests.push({
+            test: "Basic isolation",
+            result: "❌ Error",
+            error: error.message
+          });
+        }
+        
+        // Test 2: Process visibility isolation
+        try {
+          // Start isolated process with secrets
+          const isolatedProc = await sandbox.startProcessWithSecrets(
+            'sh -c "echo Started with SECRET=$DATABASE_PASSWORD && sleep 10"',
+            {
+              env: {
+                DATABASE_PASSWORD: 'prod-db-password-123',
+                API_KEY: 'sk-secret-api-key'
+              }
+            }
+          );
+          
+          tests.push({
+            test: "Started isolated process",
+            result: `PID: ${isolatedProc.pid}, ID: ${isolatedProc.id}`
+          });
+          
+          // Check if visible in process list
+          const processList = await sandbox.listProcesses();
+          const isVisible = processList.some(p => p.id === isolatedProc.id);
+          
+          tests.push({
+            test: "Isolated process hidden from list",
+            result: isVisible ? "❌ VISIBLE (bad)" : "✅ HIDDEN (good)",
+            totalProcesses: processList.length
+          });
+          
+          // Try to read its environment
+          if (isolatedProc.pid) {
+            const envRead = await sandbox.exec(
+              `cat /proc/${isolatedProc.pid}/environ 2>&1 | tr '\\0' '\\n' | grep -E '(DATABASE_PASSWORD|API_KEY)' || echo 'Not found'`
+            );
+            tests.push({
+              test: `Cannot read /proc/${isolatedProc.pid}/environ`,
+              result: envRead.stdout.includes('prod-db-password') ? "❌ EXPOSED" : "✅ PROTECTED",
+              output: envRead.stdout.trim()
+            });
+          }
+          
+          // Clean up
+          await sandbox.killProcess(isolatedProc.id).catch(() => {});
+          
+        } catch (error: any) {
+          tests.push({
+            test: "Process isolation",
+            result: "❌ Error",
+            error: error.message
+          });
+        }
+        
+        // Test 3: File system sharing (files should be shared)
+        try {
+          const filename = `/tmp/namespace_test_${Date.now()}.txt`;
+          
+          // Write file in isolated namespace
+          await sandbox.execWithSecrets(
+            `echo "Written in isolated namespace with SECRET=$SECRET_VALUE" > ${filename}`,
+            {
+              env: { SECRET_VALUE: 'should-not-leak' }
+            }
+          );
+          
+          // Read from main namespace
+          const readResult = await sandbox.exec(`cat ${filename}`);
+          const fileAccessible = readResult.exitCode === 0;
+          const containsSecret = readResult.stdout.includes('should-not-leak');
+          
+          tests.push({
+            test: "File system is shared",
+            result: fileAccessible ? "✅ Files accessible" : "❌ Files not shared",
+            secretInFile: containsSecret ? "Yes (expected in file)" : "No"
+          });
+          
+          // Clean up
+          await sandbox.exec(`rm ${filename}`);
+          
+        } catch (error: any) {
+          tests.push({
+            test: "File system sharing",
+            result: "❌ Error",
+            error: error.message
+          });
+        }
+        
+        // Test 4: Real-world AWS CLI test (if credentials available)
+        if (url.searchParams.get('test-aws') === 'true') {
+          try {
+            const awsResult = await sandbox.execWithSecrets(
+              'aws sts get-caller-identity',
+              {
+                env: {
+                  AWS_ACCESS_KEY_ID: env.TEST_AWS_KEY || 'test-key',
+                  AWS_SECRET_ACCESS_KEY: env.TEST_AWS_SECRET || 'test-secret',
+                  AWS_DEFAULT_REGION: 'us-east-1'
+                }
+              }
+            );
+            
+            tests.push({
+              test: "AWS CLI with isolated credentials",
+              result: awsResult.exitCode === 0 ? "✅ SUCCESS" : "❌ FAILED",
+              isolated: awsResult.isolated,
+              output: awsResult.stdout.substring(0, 100)
+            });
+            
+            // Verify credentials not in main namespace
+            const mainAwsCheck = await sandbox.exec('aws sts get-caller-identity 2>&1');
+            tests.push({
+              test: "Main namespace cannot use AWS",
+              result: mainAwsCheck.exitCode !== 0 ? "✅ No credentials" : "❌ Has credentials!"
+            });
+            
+          } catch (error: any) {
+            tests.push({
+              test: "AWS CLI test",
+              result: "⚠️ Skipped",
+              reason: "No AWS credentials or error",
+              error: error.message
+            });
+          }
+        }
+        
+        // Test 5: Performance benchmark
+        try {
+          const iterations = 10;
+          const normalTimings: number[] = [];
+          const isolatedTimings: number[] = [];
+          
+          // Benchmark normal execution
+          for (let i = 0; i < iterations; i++) {
+            const start = Date.now();
+            await sandbox.exec('true');
+            normalTimings.push(Date.now() - start);
+          }
+          
+          // Benchmark isolated execution
+          for (let i = 0; i < iterations; i++) {
+            const start = Date.now();
+            await sandbox.execWithSecrets('true', {
+              env: { ITERATION: String(i) }
+            });
+            isolatedTimings.push(Date.now() - start);
+          }
+          
+          const avgNormal = normalTimings.reduce((a, b) => a + b) / iterations;
+          const avgIsolated = isolatedTimings.reduce((a, b) => a + b) / iterations;
+          const overhead = avgIsolated - avgNormal;
+          
+          tests.push({
+            test: "Performance overhead",
+            result: overhead < 10 ? "✅ Acceptable" : "⚠️ High overhead",
+            normalAvg: `${avgNormal.toFixed(2)}ms`,
+            isolatedAvg: `${avgIsolated.toFixed(2)}ms`,
+            overhead: `${overhead.toFixed(2)}ms`
+          });
+          
+        } catch (error: any) {
+          tests.push({
+            test: "Performance benchmark",
+            result: "❌ Error",
+            error: error.message
+          });
+        }
+        
+        // Summary
+        const passed = tests.filter(t => t.result?.includes('✅')).length;
+        const failed = tests.filter(t => t.result?.includes('❌')).length;
+        const warnings = tests.filter(t => t.result?.includes('⚠️')).length;
+        const vulnerabilities = tests.filter(t => t.isVulnerable).length;
+        
+        // Determine overall security status
+        let overallStatus = 'UNKNOWN';
+        let statusMessage = '';
+        
+        if (hasNewMethods && failed === 0) {
+          overallStatus = 'SECURE';
+          statusMessage = '🎉 Namespace isolation working correctly!';
+        } else if (hasNewMethods && failed > 0) {
+          overallStatus = 'PARTIAL';
+          statusMessage = '⚠️ Namespace isolation implemented but has issues';
+        } else if (vulnerabilities > 0) {
+          overallStatus = 'VULNERABLE';
+          statusMessage = '🚨 Current implementation exposes secrets to all code';
+        }
+        
+        return Response.json({
+          summary: {
+            total: tests.length,
+            passed,
+            failed,
+            warnings,
+            vulnerabilities,
+            status: overallStatus,
+            message: statusMessage,
+            implementation: hasNewMethods ? 'v2.0 (with isolation)' : 'v1.x (without isolation)'
+          },
+          tests
+        }, {
+          headers: { "content-type": "application/json" },
+          status: 200  // Always 200 for test results
+        });
+      }
+
+      return new Response(
+        "Unknown path. Try: /test-capabilities, /test-isolation, /test-processes, or /test-comprehensive",
+        { status: 404 }
+      );
 
     } catch (error: any) {
       console.error("Error:", error);

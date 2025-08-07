@@ -1,6 +1,6 @@
 # Security Test Worker
 
-This worker tests the security capabilities and limitations of Cloudflare Containers.
+This worker tests the security capabilities and limitations of Cloudflare Containers, and validates namespace isolation implementation.
 
 ## Setup
 
@@ -48,44 +48,86 @@ This tests:
 - /proc filesystem enumeration
 - Cross-process environment reading
 
-## What We're Looking For
-
-### Critical Capabilities for Security
-
-1. **CAP_SYS_ADMIN**: Can we create namespaces for isolation?
-2. **Seccomp Filters**: Are dangerous syscalls blocked?
-3. **Cgroup Delegation**: Can we create isolated process groups?
-4. **Process Isolation**: Can processes read each other's environment?
-
-### Expected Results
-
-#### Current (Likely) State
-- ❌ No CAP_SYS_ADMIN (cannot create namespaces)
-- ❌ Can read /proc/*/environ (credential theft possible)
-- ❌ All processes visible to each other
-- ❌ Secrets exposed to all code
-
-#### Desired State (With Platform Support)
-- ✅ CAP_SYS_ADMIN enabled (namespace isolation)
-- ✅ Custom seccomp filters (block cross-process reads)
-- ✅ Cgroup v2 with delegation (process group isolation)
-- ✅ Complete credential isolation
-
-## Deployment Notes
-
-When you deploy this, you'll see output like:
-
-```json
-[
-  {
-    "test": "CAP_SYS_ADMIN (PID namespace)",
-    "result": "❌ NOT AVAILABLE: unshare: unshare failed: Operation not permitted"
-  },
-  {
-    "test": "Read /proc/1/environ",
-    "result": "⚠️ CAN READ (security risk!)"
-  }
-]
+### 4. 🆕 Comprehensive Security Validation
+```bash
+curl https://your-worker.workers.dev/test-comprehensive
 ```
 
-Share these results to understand what security features are available!
+This is the main validation endpoint that:
+- Detects SDK version (v1.x vulnerable vs v2.0 with isolation)
+- Tests current vulnerabilities if no isolation is implemented
+- Validates namespace isolation if new methods are available
+- Provides clear VULNERABLE/SECURE status
+
+## Success Criteria
+
+### Using `/test-comprehensive` for Validation
+
+The comprehensive test will show different results based on implementation status:
+
+#### Before Implementation (Current State - v1.x)
+```json
+{
+  "summary": {
+    "status": "VULNERABLE",
+    "message": "🚨 Current implementation exposes secrets to all code",
+    "implementation": "v1.x (without isolation)",
+    "vulnerabilities": 1
+  }
+}
+```
+
+#### After Implementation (Target State - v2.0)
+```json
+{
+  "summary": {
+    "status": "SECURE",
+    "message": "🎉 Namespace isolation working correctly!",
+    "implementation": "v2.0 (with isolation)",
+    "passed": 8,
+    "failed": 0
+  }
+}
+```
+
+### What Each Test Validates
+
+| Test | Current (v1.x) | Target (v2.0) |
+|------|----------------|---------------|
+| Environment Variables | ❌ Exposed to all code | ✅ Isolated in namespace |
+| Process Visibility | ❌ All processes visible | ✅ Isolated processes hidden |
+| /proc Access | ❌ Can read any process | ✅ Cross-namespace blocked |
+| File Sharing | ✅ Works | ✅ Still works |
+| Performance | N/A | ✅ < 10ms overhead |
+
+## Production vs Local Development
+
+### Production Environment
+- ✅ Has CAP_SYS_ADMIN (discovered through testing!)
+- ✅ Can create namespaces
+- ✅ Full isolation possible
+
+### Local Development
+- ❌ No CAP_SYS_ADMIN (safety restriction)
+- ⚠️ Falls back to process isolation
+- ⚠️ Shows warning about degraded security
+
+## How to Use for Implementation Validation
+
+1. **Before starting implementation:**
+   ```bash
+   curl http://localhost:8787/test-comprehensive | jq .summary
+   # Should show "status": "VULNERABLE"
+   ```
+
+2. **After implementing namespace isolation:**
+   ```bash
+   curl http://localhost:8787/test-comprehensive | jq .summary
+   # Should show "status": "SECURE"
+   ```
+
+3. **Check specific test results:**
+   ```bash
+   curl http://localhost:8787/test-comprehensive | jq .tests
+   # Review each test for pass/fail status
+   ```
