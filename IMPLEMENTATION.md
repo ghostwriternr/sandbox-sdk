@@ -165,6 +165,53 @@ Platform Developer
     └── The Problem: Claude can't use our SDK - it's inside the container!
 ```
 
+### The Three Types of Credentials
+
+We actually have THREE distinct credential categories to manage:
+
+#### 1. Platform Credentials (Platform's AWS, GCP, etc.)
+- **Owner**: Platform developer
+- **Used for**: Deploying to platform's infrastructure
+- **Example**: AWS credentials for platform's account
+- **Who needs access**: Platform tools (aws cli, gcloud, terraform)
+- **Who must NOT have access**: User's generated application code
+
+#### 2. Service Credentials (AI Agent API keys)
+- **Owner**: Platform developer
+- **Used for**: AI agent functionality
+- **Example**: ANTHROPIC_API_KEY, OPENAI_API_KEY
+- **Who needs access**: AI agent processes (claude, gpt)
+- **Who must NOT have access**: User's generated application code
+
+#### 3. User Service Credentials (User's own services) 🆕
+- **Owner**: End user of the platform
+- **Used for**: User's own service integrations
+- **Example**: User's Supabase account, user's Firebase project
+- **Who needs access**: BOTH AI agents AND generated code!
+- **Who must NOT have access**: Other users' containers
+
+```typescript
+// Example scenario:
+// Platform lets users build Supabase-powered apps
+
+// User authenticates their Supabase account
+await sandbox.setUserCredentials({
+  SUPABASE_URL: 'https://user-project.supabase.co',
+  SUPABASE_ANON_KEY: 'user-key-123'
+});
+
+// AI generates code using Supabase
+await sandbox.exec('claude -p "Create a todo app with Supabase"');
+// Claude needs SUPABASE credentials to test the integration
+
+// Generated app also needs Supabase
+await sandbox.exec('node todo-app.js');
+// App needs SAME SUPABASE credentials to work!
+
+// But platform secrets must still be protected
+// The app should NOT see AWS_ACCESS_KEY_ID (platform's)
+```
+
 ### The Uncontrollable AI Problem
 
 **Critical Issue**: AI models are not 100% steerable. Even with clear instructions, Claude Code might:
@@ -176,128 +223,313 @@ Platform Developer
 
 This means we CANNOT rely on the AI to always make the right decision about security contexts.
 
-### Radical Solution Options
+### The Fundamental Rethink: Contexts, Not Commands
 
-#### Option 1: Command Interception Proxy
-Replace standard shell with a proxy that routes commands back to the Worker:
+The curve ball scenario that breaks our design:
 ```bash
-# Inside container, Claude runs:
-aws s3 ls  # This actually calls our proxy
+# Platform's AWS account (for templates)
+aws s3 cp s3://platform-templates/starter.zip .
 
-# Our proxy (in container) calls back to Worker:
-GET /decide-execution?cmd=aws+s3+ls
-# Worker responds: {"useSecrets": true}
+# User's AWS account (for their RDS)
+aws rds create-db-instance --db-instance-identifier user-db
 
-# Proxy then executes with or without secrets based on response
+# SAME TOOL, DIFFERENT ACCOUNTS!
 ```
 
-#### Option 2: Two-Container Architecture
+String matching `aws *` is fundamentally broken because we can't distinguish intent from command alone.
+
+### New Approach: Execution Contexts as Primitives
+
+Instead of trying to be clever with pattern matching, we provide **execution context primitives** that platform developers can compose:
+
 ```typescript
-// Platform starts TWO containers
-const platformContainer = await sandbox.startContainer('platform-ops', {
-  env: { AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY }
+// PRIMITIVE 1: Named credential sets
+await sandbox.defineCredentialSet('platform-aws', {
+  AWS_ACCESS_KEY_ID: 'platform-key',
+  AWS_SECRET_ACCESS_KEY: 'platform-secret'
 });
 
-const userContainer = await sandbox.startContainer('user-code', {
-  env: {} // No secrets
+await sandbox.defineCredentialSet('user-aws', {
+  AWS_ACCESS_KEY_ID: 'user-key',
+  AWS_SECRET_ACCESS_KEY: 'user-secret'
 });
 
-// Claude Code somehow needs to know which container to use
-// Maybe via special commands or prefixes
+await sandbox.defineCredentialSet('user-supabase', {
+  SUPABASE_URL: 'https://user.supabase.co',
+  SUPABASE_ANON_KEY: 'user-key'
+});
+
+// PRIMITIVE 2: Execution with specific contexts
+// Platform developer explicitly chooses which context for each operation
+await sandbox.execWithContext('aws s3 cp s3://platform-templates/starter.zip .', {
+  credentialSets: ['platform-aws']
+});
+
+await sandbox.execWithContext('aws rds create-db-instance --db-instance-identifier user-db', {
+  credentialSets: ['user-aws']
+});
+
+await sandbox.execWithContext('node app.js', {
+  credentialSets: ['user-supabase', 'user-aws']  // App gets user's credentials
+});
 ```
 
-#### Option 3: Sudo-like Wrapper Binary
+But wait... this doesn't solve the Claude problem either! Claude can't call our SDK.
+
+### The Real Solution: Environment Profiles with Explicit Switching
+
+Since Claude can't call our SDK, we need a mechanism that works at the shell level:
+
 ```bash
-# Install special binary in container
-# Claude learns to use it for platform operations
+# Platform provides shell commands to switch contexts
+# These are available INSIDE the container
 
-# With secrets:
-with-platform-auth aws s3 ls
-with-platform-auth npm publish
+$ use-context platform-aws
+[Switched to platform-aws context]
 
-# Without secrets (normal):
-node app.js
-npm test
+$ aws s3 cp s3://platform-templates/starter.zip .
+# Uses platform's AWS credentials
+
+$ use-context user-aws
+[Switched to user-aws context]
+
+$ aws rds create-db-instance --db-instance-identifier user-db
+# Uses user's AWS credentials
+
+$ use-context default
+[Switched to default context - no platform secrets]
+
+$ node app.js
+# Runs with only user-service credentials
 ```
 
-#### Option 4: Environment Variable Filtering via LD_PRELOAD
-```c
-// Custom library that intercepts getenv() calls
-// Filters based on process name/command
-// Preloaded for all processes in container
+Implementation: The `use-context` command modifies environment variables for all subsequent commands in that shell session.
 
-// aws, gcloud, npm -> can see secrets
-// node, python, ruby -> cannot see secrets
-```
+### The Final Design: Three-Layer Primitive System
 
-#### Option 5: Command Pattern Rules Engine
+#### Layer 1: Credential Set Management (SDK Level)
 ```typescript
-// Bun server maintains rules for what commands get secrets
-const PLATFORM_COMMANDS = [
-  /^aws\s+/,
-  /^gcloud\s+/,
-  /^npm\s+publish/,
-  /^docker\s+push/,
-  /^terraform\s+/
-];
-
-// Every process spawn goes through our wrapper
-// Wrapper checks command against rules
-// Injects or strips environment accordingly
-```
-
-#### Option 6: Explicit Secret Request Protocol
-```typescript
-// Claude must explicitly request secrets for each command
-// Via a special file or socket
-
-// Claude writes to /tmp/secret-request.json:
-{
-  "command": "aws s3 ls",
-  "reason": "deploying user application",
-  "secrets_needed": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]
+// Platform developer defines credential sets
+interface CredentialSet {
+  name: string;
+  credentials: Record<string, string>;
+  isDefault?: boolean;  // Available to all processes by default
 }
 
-// Bun server approves/denies and executes accordingly
+await sandbox.defineCredentialSet('platform-aws', {...}, {isDefault: false});
+await sandbox.defineCredentialSet('user-supabase', {...}, {isDefault: true});
 ```
 
-#### Option 7: Time-boxed Secret Windows
+#### Layer 2: Context Switching (Container Level)
+```bash
+# Inside container, provided utilities:
+use-context <context-name>    # Switch active context
+list-contexts                  # Show available contexts
+show-context                   # Show current context
+with-context <name> <command> # Run single command with context
+```
+
+#### Layer 3: Default Context Rules (Optional)
 ```typescript
-// Platform developer explicitly opens a "secret window"
-await sandbox.openSecretWindow(30000); // 30 seconds
-// During this time, ALL commands have access to secrets
-
-await sandbox.exec('aws s3 sync . s3://bucket/');
-await sandbox.exec('aws ecs update-service ...');
-
-await sandbox.closeSecretWindow();
-// After this, no commands have secrets
+// Platform developer can optionally set rules for convenience
+// But these are just defaults, not security boundaries
+await sandbox.setContextDefaults({
+  'aws s3 * s3://platform-templates/*': 'platform-aws',
+  'aws rds *': 'user-aws',
+  'supabase *': 'user-supabase'
+});
 ```
 
-### Proposed Solution Architecture (Recommended)
+### How This Solves Everything
 
-After analyzing all options, the most practical solution combines several approaches:
+1. **Claude using platform AWS**: 
+   ```bash
+   use-context platform-aws && aws s3 sync . s3://platform-deploy/
+   ```
 
-1. **Default Claude Without Secrets**: Start Claude Code WITHOUT platform secrets initially
-2. **Explicit Secret Injection**: Platform developer controls when secrets are available
-3. **Wrapper Binary for Clarity**: Provide `with-secrets` command for explicit secret operations
-4. **Callback Mechanism**: Allow container to request secrets from Worker when needed
+2. **Claude using user AWS**:
+   ```bash
+   use-context user-aws && aws rds create-db-instance
+   ```
+
+3. **Generated app with user credentials**:
+   ```bash
+   use-context user-services && node app.js
+   ```
+
+4. **Platform developer has full control**: They decide what contexts exist and what's in them
+
+5. **No string matching hacks**: Context is explicit, not inferred
+
+### Implementation Details
+
+#### Option A: Environment Variable Switching
+```c
+// Custom shared library that intercepts getenv() calls at runtime
+// Automatically loaded for ALL processes via LD_PRELOAD
+
+// How it works:
+// 1. Process calls getenv("AWS_ACCESS_KEY_ID")
+// 2. Our library intercepts this call
+// 3. Checks the calling process name/path
+// 4. Returns the secret OR NULL based on rules
+
+// Implementation sketch:
+char* getenv(const char* name) {
+    static char* (*real_getenv)(const char*) = NULL;
+    if (!real_getenv) {
+        real_getenv = dlsym(RTLD_NEXT, "getenv");
+    }
+    
+    // Get the current process name
+    char* process_name = get_process_name();
+    
+    // Check if this process should have access
+    if (is_platform_command(process_name)) {
+        return real_getenv(name);  // Return actual secret
+    }
+    
+    // Filter out secrets for user code
+    if (is_secret(name)) {
+        return NULL;  // Hide the secret
+    }
+    
+    return real_getenv(name);
+}
+
+// Platform commands that get secrets:
+// /usr/bin/aws, /usr/bin/gcloud, /usr/bin/npm (only for publish)
+// Everything else (node, python, ruby, etc.) gets NULL
+```
+
+**Pros:**
+- Completely transparent to Claude - it just runs `aws s3 ls` normally
+- Works with ANY language/tool Claude might use
+- Platform developer can configure rules
+- Zero changes to AI behavior required
+
+**Cons:**
+- Requires compiling and maintaining a C library
+- LD_PRELOAD can be bypassed by statically linked binaries
+- Debugging might be harder
+
+#### Option B: Command Pattern Rules Engine with Process Wrapping
+```typescript
+// Platform developer configures rules
+await sandbox.configureSecurity({
+  platformCommands: [
+    'aws *',
+    'gcloud *', 
+    'npm publish',
+    'docker push *',
+    'terraform *'
+  ]
+});
+
+// Implementation: Replace /bin/sh with our wrapper
+// When ANY process is spawned (by Claude or anything else):
+// 1. Our wrapper intercepts it
+// 2. Checks command against patterns
+// 3. Executes with or without secrets
+
+// In container's /bin/sh (our wrapper):
+#!/usr/bin/node
+const realCommand = process.argv.slice(2).join(' ');
+
+// Check with bun server
+const response = await fetch('http://localhost:3000/should-have-secrets', {
+  body: JSON.stringify({ command: realCommand })
+});
+
+const { useSecrets } = await response.json();
+
+if (useSecrets) {
+  // Execute with platform secrets
+  process.env.AWS_ACCESS_KEY_ID = await getSecret('AWS_ACCESS_KEY_ID');
+  process.env.AWS_SECRET_ACCESS_KEY = await getSecret('AWS_SECRET_ACCESS_KEY');
+}
+
+// Execute the real command
+exec(realCommand);
+```
+
+**Pros:**
+- Platform developer has full control via patterns
+- Works transparently with Claude's normal behavior
+- Can log all command decisions for audit
+- Easier to implement than LD_PRELOAD
+
+**Cons:**
+- Performance overhead on every command
+- Requires replacing shell (but we control the container)
+
+#### Option C: Command Interception Proxy (Simplified)
+```bash
+# Instead of replacing shell, we replace specific binaries
+# In container, /usr/bin/aws is actually our proxy:
+
+#!/bin/bash
+# /usr/bin/aws (our proxy)
+# Request secrets from bun server
+CREDS=$(curl -s http://localhost:3000/get-aws-creds)
+export AWS_ACCESS_KEY_ID=$(echo $CREDS | jq -r .key)
+export AWS_SECRET_ACCESS_KEY=$(echo $CREDS | jq -r .secret)
+
+# Call the real AWS CLI (renamed to aws.real)
+/usr/bin/aws.real "$@"
+```
+
+**Pros:**
+- Very targeted - only affects specific commands
+- Claude uses commands normally
+- Easy to implement and understand
+- Can add logging/auditing per command
+
+**Cons:**
+- Need to wrap each platform tool individually
+- Claude might use unexpected tools (boto3, terraform, etc.)
+
+### Recommended Approach: Hybrid of B + C
+
+1. **Default Rule Engine (Option B)**: Catches most cases automatically
+2. **Specific Binary Wrappers (Option C)**: For critical tools like AWS CLI
+3. **Platform Developer Control**: Can configure patterns and rules
 
 ```typescript
-// Solution: Claude starts WITHOUT secrets
-const claude = await sandbox.startProcess('claude -p "deploy my app"');
+// Platform developer configures security
+await sandbox.configureSecurity({
+  // Pattern-based rules for automatic detection
+  platformCommands: [
+    /^aws\s+/,
+    /^gcloud\s+/,
+    /^npm\s+publish/,
+    /^docker\s+push/
+  ],
+  
+  // Explicit binaries to wrap
+  wrappedBinaries: ['aws', 'gcloud', 'terraform'],
+  
+  // Secrets to inject when patterns match
+  platformSecrets: {
+    'aws *': ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'],
+    'gcloud *': ['GOOGLE_APPLICATION_CREDENTIALS'],
+    'npm publish': ['NPM_TOKEN']
+  }
+});
 
-// Claude can request platform operations via special command
-// Inside Claude's execution:
-// $ request-platform-op "aws s3 ls"
-// This calls back to Worker, which executes with secrets
-
-// Or using wrapper:
-// $ with-platform-auth aws s3 ls
-// Wrapper requests secrets from Worker before executing
+// Claude runs normally
+await sandbox.startProcess('claude -p "Deploy my app"');
+// Claude executes: aws s3 sync . s3://bucket/
+// Our wrapper detects this matches 'aws *' pattern
+// Injects ONLY the AWS credentials for that command
+// The app Claude wrote never sees these credentials
 ```
 
-This gives platform developers full control while allowing Claude to perform necessary operations.
+This approach:
+- Works with Claude's normal training/behavior
+- Gives platform developers granular control
+- Provides defense in depth (patterns + wrappers)
+- Maintains security boundary without AI cooperation
 
 ## Executive Summary
 
