@@ -2,11 +2,13 @@
 
 ## Executive Summary
 
-The Cloudflare Sandbox SDK currently has a critical security vulnerability where platform-level secrets (API keys, database credentials, etc.) set via `setEnvVars()` are accessible to all user code running in the sandbox. This document analyzes the vulnerability, explores solutions, and recommends a phased approach to fix it while maintaining backward compatibility.
+The Cloudflare Sandbox SDK currently has a critical security vulnerability where platform-level secrets (API keys, database credentials, etc.) set via `setEnvVars()` are accessible to all user code running in the sandbox. This document analyzes the vulnerability, explores solutions, and recommends a phased approach to fix it.
 
 **Key Finding**: Any environment variable set through `setEnvVars()` becomes accessible to ALL code executed in the container, including user-generated code, AI-generated code, and third-party dependencies.
 
-**Recommended Solution**: Implement a Platform Operations Proxy pattern where secrets remain in the Worker layer and never enter the sandbox environment.
+**Critical Insight**: We control the container's bun server (control plane), which opens up powerful mitigation strategies like in-memory credential vaults and isolated execution contexts.
+
+**Recommended Solution**: Leverage our container control to implement secure execution with just-in-time credentials, while requesting platform-level enhancements for complete isolation.
 
 ## Problem Statement
 
@@ -72,6 +74,19 @@ console.log(process.env);  // Exposes ALL environment variables
    - Uses API keys for rate limiting, billing
    - User code should go through platform's API layer, not direct access
 
+4. **AWS Deployment Platform** (Critical Use Case)
+   - AI generates Lambda functions or infrastructure code
+   - Code needs to be packaged and deployed to AWS
+   - AWS CLI must run INSIDE container (where files are)
+   - AWS CLI requires credentials via env vars or ~/.aws/credentials
+   - Cannot modify how AWS CLI works
+
+5. **Database Migration Platform**
+   - Platform needs to run migrations through bastion hosts
+   - SSH tunnels and database tools need credentials
+   - Migration scripts run in container with database access
+   - Tools expect standard credential formats
+
 ### Trust Boundaries
 
 ```
@@ -114,7 +129,18 @@ Current issue: No boundary between Platform Layer and User Code Layer within the
 - Single container instance per sandbox
 - All processes share the same Linux namespace
 - Environment variables are process-wide, inherited by children
-- No built-in secret store or credential provider
+- **We control the bun server** at `/container_src/index.ts` that handles all operations
+- The bun server acts as our control plane between Worker/DO and user code
+
+### Tool Integration Reality
+- **Third-party tools (AWS CLI, gcloud, terraform, etc.) cannot be modified**
+- These tools expect credentials in standard locations:
+  - Environment variables (AWS_ACCESS_KEY_ID, GOOGLE_APPLICATION_CREDENTIALS)
+  - Config files (~/.aws/credentials, ~/.config/gcloud)
+  - Cannot be instructed to use custom credential providers
+- **Container code is arbitrary** - any language, any framework
+- **AI models don't know about platform-specific patterns**
+- **Everything runs in the same process namespace**
 
 ## Requirements for a Solution
 
@@ -289,6 +315,106 @@ All Code Has Access ⚠️
 - Operations require explicit capability presentation
 - Pros: Principle of least privilege, explicit security
 - Cons: Major API redesign, breaking changes
+
+## Our Leverage: Container Control
+
+### What We Control
+We have significant leverage through our bun server that runs as the container's control plane:
+
+1. **The base Docker image** - We provide the foundation all developers build on
+2. **The bun server** (`/container_src/index.ts`) - Mediates ALL operations:
+   - Command execution (`/api/execute`)
+   - File operations (`/api/write`, `/api/read`)
+   - Process management (`/api/process/*`)
+   - Port forwarding (`/api/expose-port`)
+3. **The communication channel** - All Worker↔Container communication goes through our server
+
+### Solutions We Can Build Today
+
+#### In-Memory Credential Vault
+```typescript
+// In our bun server - credentials never touch process.env
+class CredentialVault {
+  private secrets = new Map<string, string>();
+  private accessLog: AccessRecord[] = [];
+  
+  // Store credentials encrypted in memory
+  store(creds: Record<string, string>) {
+    for (const [key, value] of Object.entries(creds)) {
+      this.secrets.set(key, encrypt(value));
+    }
+  }
+  
+  // Execute with just-in-time injection
+  async execWithCreds(command: string, credKeys: string[], timeout: number) {
+    const creds = {};
+    credKeys.forEach(key => {
+      creds[key] = decrypt(this.secrets.get(key));
+    });
+    
+    // THE CRITICAL MOMENT - credentials briefly visible
+    const proc = spawn(command, {
+      env: { ...process.env, ...creds },
+      timeout
+    });
+    
+    // Log access for audit
+    this.accessLog.push({ command, credKeys, timestamp: Date.now() });
+    
+    return await collectOutput(proc);
+  }
+}
+```
+
+**Pros:**
+- Credentials never in global environment
+- Audit trail of all credential access
+- Can rotate credentials without restart
+- Scoped access per operation
+
+**Cons:**
+- Still exposed during execution in `/proc/[pid]/environ`
+- User code could read memory via `/proc/[bun-pid]/mem`
+- Child processes inherit credentials
+- Vulnerable to timing attacks
+
+## Alternative Approaches Considered
+
+### 1. LD_PRELOAD Injection
+```c
+// Intercept getenv() calls at libc level
+char* getenv(const char* name) {
+  if (is_credential(name) && !is_authorized_process()) {
+    return NULL;
+  }
+  return original_getenv(name);
+}
+```
+**Verdict:** Complex, can be bypassed by static linking
+
+### 2. FUSE Virtual Filesystem
+```typescript
+// Mount virtual ~/.aws/credentials that checks caller
+fuseMount('~/.aws/credentials', {
+  read: (pid) => isAuthorized(pid) ? getCredentials() : ""
+});
+```
+**Verdict:** Requires privileges we don't have
+
+### 3. Sidecar Credential Service
+```typescript
+// Separate process holds credentials, accessed via socket
+const creds = await fetch('http://unix:/tmp/creds.sock/aws-key');
+```
+**Verdict:** Requires wrapping every CLI tool
+
+### 4. Time-Based Credential Files
+```typescript
+// Write credentials with immediate deletion
+await writeFile(credFile, creds, { mode: 0o600 });
+setTimeout(() => unlink(credFile), 100); // Delete after 100ms
+```
+**Verdict:** Race conditions, still readable briefly
 
 ## Detailed Solution Proposals
 
@@ -724,22 +850,152 @@ class PlatformWorker {
 **Pros**: Complete isolation, simpler security model
 **Cons**: Requires restructuring application architecture
 
+## Real-World Tool Integration Challenge
+
+### The Fundamental Problem
+
+Many platform operations require third-party CLI tools that:
+1. **Must run inside the container** (where the files and code are)
+2. **Need real credentials** to function
+3. **Cannot be modified** to use custom auth mechanisms
+4. **Read credentials from standard locations** (env vars or config files)
+
+### Example: AWS Deployment Workflow
+
+```typescript
+// What platforms need to do:
+// 1. AI generates Lambda function code
+await sandbox.writeFile('/app/lambda.js', aiGeneratedCode);
+
+// 2. Package the code (must happen in container)
+await sandbox.exec('zip function.zip lambda.js node_modules/**');
+
+// 3. Deploy to AWS (needs AWS CLI with credentials)
+await sandbox.exec('aws lambda update-function-code --function-name my-func --zip-file fileb://function.zip');
+// ⚠️ AWS CLI needs AWS_ACCESS_KEY_ID in environment!
+
+// 4. Run database migrations through bastion
+await sandbox.exec('aws ssm start-session --target i-bastion --document AWS-StartPortForwardingSession');
+await sandbox.exec('npm run db:migrate');
+// ⚠️ Both commands need AWS credentials!
+```
+
+### Why Current Solutions Fall Short
+
+| Solution | Why It Doesn't Work for CLI Tools |
+|----------|------------------------------------|
+| **Platform Proxy** | Can't proxy AWS CLI - it needs creds in container |
+| **Worker Orchestration** | Can't use AWS CLI from Worker - files are in container |
+| **Temporary Credentials** | Still exposed to user code during operation |
+| **Capability Tokens** | AWS CLI doesn't understand our tokens |
+| **SDK Pattern** | Can't rewrite every CLI tool |
+
+## Practical Workarounds (Current State)
+
+### 1. Hybrid Orchestration (Partial Security)
+```typescript
+// Do what you can in Worker, accept risks for what you can't
+class PlatformDeployer {
+  async deployToAWS(sandbox: Sandbox, userId: string) {
+    // Safe: Package in container without secrets
+    await sandbox.exec('zip function.zip *.js');
+    
+    // Safe: Pull package to Worker
+    const pkg = await sandbox.readFile('/app/function.zip');
+    
+    // Safe: Deploy from Worker using SDK
+    const lambda = new AWS.Lambda({
+      credentials: this.awsCredentials
+    });
+    await lambda.updateFunctionCode({
+      FunctionName: 'my-func',
+      ZipFile: pkg.content
+    }).promise();
+    
+    // RISKY: When CLI is unavoidable, use minimal scoped temp creds
+    const tempCreds = await this.createScopedTempCredentials({
+      duration: 300, // 5 minutes
+      permissions: ['s3:GetObject'],
+      resources: ['arn:aws:s3:::templates/*']
+    });
+    
+    await sandbox.setEnvVars(tempCreds);
+    await sandbox.exec('aws s3 cp s3://templates/base.yaml .');
+    // ⚠️ Credentials exposed for 5 minutes
+  }
+}
+```
+
+### 2. Tooling Wrapper Scripts (Defense in Depth)
+```typescript
+// Create wrapper scripts that limit credential exposure
+await sandbox.writeFile('/app/deploy.sh', `
+#!/bin/bash
+set -e
+# Clear history
+export HISTFILE=/dev/null
+# Run operation
+aws lambda update-function-code "$@"
+# Immediately clear credentials
+unset AWS_ACCESS_KEY_ID
+unset AWS_SECRET_ACCESS_KEY
+exit $?
+`);
+
+await sandbox.exec('chmod +x deploy.sh');
+await sandbox.exec('./deploy.sh --function-name my-func --zip-file fileb://function.zip');
+```
+
+### 3. Separate Deployment Service (Most Secure)
+```typescript
+// Don't deploy from sandbox at all - use separate service
+class DeploymentService {
+  async deploy(sandbox: Sandbox, userId: string) {
+    // Package in sandbox
+    await sandbox.exec('npm run build');
+    await sandbox.exec('zip -r package.zip dist/');
+    
+    // Upload to staging area
+    const pkg = await sandbox.readFile('/app/package.zip');
+    const stagingUrl = await this.uploadToStaging(pkg.content);
+    
+    // Trigger deployment service (runs outside sandbox)
+    await fetch('https://deploy-service.internal/deploy', {
+      method: 'POST',
+      body: JSON.stringify({
+        userId,
+        packageUrl: stagingUrl,
+        target: 'production'
+      }),
+      headers: {
+        'Authorization': `Bearer ${this.deployServiceToken}`
+      }
+    });
+  }
+}
+```
+
 ## Recommendations Summary
 
-### Short Term (1-2 weeks)
-1. Document security limitations
-2. Add detection and warnings
-3. Provide secure code examples
+### Immediate (Today)
+1. **Document the limitation clearly** - CLI tools need real credentials
+2. **Provide secure patterns** for common operations
+3. **Warn developers** about the security trade-offs
 
-### Medium Term (1-2 months)  
-1. Implement Platform Operations Proxy
-2. Add `setUserEnvVars()` and `setPlatformSecrets()`
-3. Create migration tools
+### Short Term (1-2 weeks)
+1. Create **tool-specific wrappers** that minimize exposure
+2. Implement **credential rotation** for temporary access
+3. Build **allowlist of safe CLI operations**
+
+### Medium Term (1-2 months)
+1. Develop **separate deployment service** pattern
+2. Create **SDK alternatives** for common CLI operations
+3. Implement **audit logging** for all credential usage
 
 ### Long Term (3-6 months)
-1. Remove insecure `setEnvVars()`
-2. Implement Platform SDK
-3. Add advanced security features
+1. Work with Cloudflare to add **process-level isolation**
+2. Investigate **kernel namespaces** for credential isolation
+3. Build **credential proxy daemon** that mediates access
 
 ## Platform Research Findings
 
@@ -892,18 +1148,198 @@ class SecureSandbox extends Container {
 - Add audit logging
 - Validate all parameters
 
-## Next Steps
+## What We Can Build in the SDK
 
-1. ✅ Understand the SDK's internal architecture 
-2. ✅ Analyze current implementation security gaps
-3. ✅ Document edge cases and considerations
-4. ✅ Research platform capabilities and RPC patterns
-5. **NOW**: Build POC with RPC callbacks
-6. **TODO**: Test performance impact of RPC callbacks
-7. **TODO**: Design detailed TypeScript API
-8. **TODO**: Create security test suite
-9. **TODO**: Write migration guide
-10. **TODO**: Get feedback and iterate
+Leveraging our control of the bun server, we can implement:
+
+### 1. Secure Execution API
+```typescript
+// New SDK methods that use our container control
+interface SecureSandbox extends Sandbox {
+  // Register credentials with container vault (never in env)
+  async registerCredentials(creds: Record<string, string>): Promise<void>;
+  
+  // Execute with just-in-time credential injection
+  async execSecure(command: string, options: {
+    credentials: string[],  // Which credentials to inject
+    timeout: number,        // Max execution time
+    isolated?: boolean      // Hide from process list
+  }): Promise<ExecResult>;
+}
+
+// Implementation in bun server
+app.post('/api/secure/exec', async (req) => {
+  const { command, credentials, timeout } = req.body;
+  
+  // Get from vault, not env
+  const creds = vault.getCredentials(credentials);
+  
+  // Create isolated process
+  const proc = spawn(command, {
+    env: { ...cleanEnv, ...creds },
+    detached: true,  // Separate process group
+    timeout
+  });
+  
+  // Hide from user's process list
+  hiddenProcesses.add(proc.pid);
+  
+  return collectOutput(proc);
+});
+```
+
+### 2. Credential Vault in Container
+```typescript
+// New endpoint in container_src/index.ts
+case "/api/vault/store":
+  // Store encrypted in memory, never in env
+  credentialVault.store(await req.json());
+  break;
+
+case "/api/vault/exec":
+  // Execute with vaulted credentials
+  const { command, credKeys, timeout } = await req.json();
+  return await credentialVault.execWithCreds(command, credKeys, timeout);
+```
+
+### 3. Process Isolation Techniques
+```typescript
+// Hide platform processes from user code
+case "/api/process/list":
+  // Filter out hidden platform processes
+  const userProcesses = processes.filter(p => !hiddenProcesses.has(p.pid));
+  return Response.json({ processes: userProcesses });
+```
+
+## What We Need From Cloudflare Platform
+
+### The Fundamental Limitation
+Even with our container control, we're limited by Linux's security model:
+
+```bash
+# ANY process can still do:
+for pid in /proc/*/; do
+  cat $pid/environ | grep AWS_ACCESS_KEY
+done
+
+# Or read our memory:
+gdb -p $(pidof bun) -ex "dump memory" | strings | grep AWS_ACCESS_KEY
+```
+
+### Platform Enhancements Needed (Priority Order)
+
+#### 1. Linux Capabilities (CAP_SYS_ADMIN)
+**What it enables:** True process isolation via namespaces
+```c
+unshare(CLONE_NEWPID | CLONE_NEWNS);  // Create isolated namespace
+```
+**Ask:** "We need CAP_SYS_ADMIN to create PID namespaces for credential isolation"
+
+#### 2. Seccomp Filters
+**What it enables:** Block dangerous syscalls
+```c
+// Block reading other processes' environ
+struct sock_filter filter[] = {
+  BPF_STMT(BPF_LD+BPF_W+BPF_ABS, offsetof(struct seccomp_data, nr)),
+  BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_open, 0, 1),
+  // Block if opening /proc/*/environ for other PIDs
+};
+```
+**Ask:** "We need seccomp filter support to prevent cross-process credential theft"
+
+#### 3. cgroups v2 Delegation
+**What it enables:** Resource and visibility isolation
+```bash
+echo $$ > /sys/fs/cgroup/platform.slice/cgroup.procs
+echo "pids.max=10" > /sys/fs/cgroup/platform.slice/pids.max
+```
+**Ask:** "We need cgroup delegation for process isolation between platform and user code"
+
+#### 4. Micro-VMs or Nested Containers
+**What it enables:** Complete kernel-level isolation
+```typescript
+await runInMicroVM({
+  command: 'aws lambda deploy',
+  credentials: awsCreds,
+  timeout: 30000
+});
+```
+**Ask:** "We need nested virtualization for handling third-party secrets securely"
+
+## Implementation Roadmap
+
+### Phase 1: Immediate (What We Can Do Now)
+1. **Build Credential Vault** in bun server
+   - In-memory storage (never in env)
+   - Just-in-time injection
+   - Audit logging
+   
+2. **Implement Secure Exec API**
+   - `execSecure()` method with timeout
+   - Process hiding from user code
+   - Credential scoping
+
+3. **Document Trade-offs**
+   - Be transparent about brief exposure window
+   - Provide security best practices
+   - Clear migration guide
+
+### Phase 2: SDK Enhancements (1-2 Months)
+1. **Credential Vault Service**
+   - Encrypted storage
+   - Rotation support
+   - Access policies
+
+2. **Process Isolation**
+   - Hidden process list
+   - Separate execution contexts
+   - Resource limits
+
+3. **Monitoring & Audit**
+   - Credential access logs
+   - Anomaly detection
+   - Alert system
+
+### Phase 3: Platform Changes (3-6 Months)
+**Request from Cloudflare:**
+1. CAP_SYS_ADMIN for namespace creation
+2. Seccomp filter support
+3. cgroup v2 delegation
+4. Nested virtualization options
+
+## Security Analysis Summary
+
+### Current State
+- **Vulnerability:** All env vars accessible to all code
+- **Exposure:** Persistent for container lifetime
+- **Risk:** High - credentials can be exfiltrated
+
+### With Container Control (What We Can Build)
+- **Vulnerability:** Brief exposure during execution
+- **Exposure:** Milliseconds to seconds
+- **Risk:** Medium - timing attacks possible
+
+### With Platform Support (Future State)
+- **Vulnerability:** None - complete isolation
+- **Exposure:** Zero - different namespaces
+- **Risk:** Low - kernel-enforced boundaries
+
+## The Bottom Line
+
+**Today:** We can achieve "good enough" security with our container control:
+- In-memory credential vault
+- Just-in-time injection
+- Process hiding
+- Audit logging
+
+**Tomorrow:** With platform support, we can achieve "bank-grade" security:
+- Complete process isolation
+- Kernel-enforced boundaries
+- No exposure window
+
+**Key Insight:** Time-based security (brief exposure) << Isolation-based security (no exposure)
+
+But time-based security >> Current state (persistent exposure)
 
 ## Concrete Example: AI Code Generation Platform
 

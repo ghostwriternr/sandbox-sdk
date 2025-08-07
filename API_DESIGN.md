@@ -1,445 +1,354 @@
-# Secure Platform Operations API Design
+# Secure Platform Operations API Design V2
 
-## Design Principles
+## The Problem We're Solving
 
-1. **Secure by Default**: Impossible to accidentally expose secrets
-2. **Intuitive**: Follows familiar patterns developers already know
-3. **Type-Safe**: Full TypeScript support with compile-time checks
-4. **Progressive Disclosure**: Simple for basic use, powerful when needed
-5. **Fail Loudly**: Clear errors when misused, not silent failures
+Platform developers need to deploy AI-generated code to AWS, but:
+1. AWS CLI must run INSIDE the container (where files are)
+2. AWS CLI needs real credentials (can't be modified)
+3. User/AI code also runs in the container
+4. We can't let user/AI code access AWS credentials
 
-## Developer Mental Model
+## The AWS Deployment Example
 
-Developers building platforms need to:
-- Run platform operations (with secrets) on behalf of users
-- Execute user/AI-generated code (without secret access)
-- Clearly separate these two contexts
+Let's use this concrete scenario throughout:
 
-## API Design Options
+```typescript
+// User prompt: "Create and deploy a Lambda function that processes images"
+// AI generates Lambda code, packages it, and needs to deploy to AWS
+```
 
-### Option 1: Service Provider Pattern (Recommended)
-**Mental model**: "I'm providing services to the sandbox that it can call"
+## Solution Patterns
+
+### Pattern 1: Worker Orchestration (Secure, Limited)
+
+**How it works**: Keep secrets in Worker, pull files out for operations
 
 ```typescript
 // Worker code
-const sandbox = await createSecureSandbox(env.Sandbox, userId);
-
-// Register platform services (with secrets)
-await sandbox.providePlatformServices({
-  storage: {
-    async fetchTemplate(templateId: string) {
-      // This runs in Worker, has access to env.R2_KEY
-      const object = await env.R2.get(`templates/${templateId}`);
-      return await object.text();
-    },
-    
-    async saveProject(name: string, data: string) {
-      await env.R2.put(`projects/${userId}/${name}`, data);
-      return { success: true };
-    }
-  },
-  
-  database: {
-    async queryUsage() {
-      const result = await env.DB.prepare(
-        "SELECT * FROM usage WHERE user_id = ?"
-      ).bind(userId).first();
-      return result;
-    }
-  },
-  
-  ai: {
-    async complete(prompt: string, model: string = 'gpt-4') {
-      return await callOpenAI(env.OPENAI_KEY, prompt, model);
-    }
-  }
-});
-
-// Set safe environment variables for user code
-await sandbox.setEnvironment({
-  NODE_ENV: 'production',
-  PORT: '3000',
-  USER_ID: userId  // Safe to expose
-});
-
-// Execute user code - it can call platform services but not access secrets
-await sandbox.exec("npm start");
-```
-
-**In the sandbox, user code can call services:**
-```javascript
-// This would be injected or available globally
-const platform = getPlatformServices();
-
-// User/AI code can call these
-const template = await platform.storage.fetchTemplate('react-starter');
-const usage = await platform.database.queryUsage();
-const completion = await platform.ai.complete('Generate a React component');
-```
-
-**Pros**:
-- Services are explicitly defined and documented
-- TypeScript can infer all method signatures
-- Clear separation of concerns
-- Services can be versioned/deprecated
-- Easy to add middleware (logging, rate limiting)
-
-**Cons**:
-- More upfront setup
-- Need to predefine all operations
-
----
-
-### Option 2: Command Pattern
-**Mental model**: "I'm sending commands to the platform"
-
-```typescript
-// Worker code
-const sandbox = await createSecureSandbox(env.Sandbox, userId);
-
-// Register command handler
-await sandbox.setPlatformHandler(async (command: PlatformCommand) => {
-  // Validate command
-  if (!ALLOWED_COMMANDS.includes(command.type)) {
-    throw new Error(`Unknown command: ${command.type}`);
-  }
-  
-  // Execute with secrets
-  switch(command.type) {
-    case 'storage:fetch':
-      return await env.R2.get(command.params.key);
-    case 'db:query':
-      return await env.DB.prepare(command.params.sql).run();
-    default:
-      throw new Error(`Unhandled command: ${command.type}`);
-  }
-});
-
-// In sandbox
-await platform.execute({ 
-  type: 'storage:fetch', 
-  params: { key: 'templates/react' }
-});
-```
-
-**Pros**:
-- Flexible, can add commands without changing API
-- Easy to implement logging/auditing
-- Can be made type-safe with discriminated unions
-
-**Cons**:
-- Less discoverable
-- Harder to get TypeScript inference
-- More verbose for users
-
----
-
-### Option 3: Capability-Based Security
-**Mental model**: "I'm granting specific capabilities to the sandbox"
-
-```typescript
-// Worker code
-const sandbox = await createSecureSandbox(env.Sandbox, userId);
-
-// Grant specific capabilities
-const capabilities = await sandbox.grantCapabilities({
-  'storage:read': {
-    paths: ['templates/*'],
-    handler: async (path) => env.R2.get(path)
-  },
-  'storage:write': {
-    paths: [`projects/${userId}/*`],
-    handler: async (path, data) => env.R2.put(path, data)
-  },
-  'ai:complete': {
-    models: ['gpt-3.5-turbo'],
-    rateLimit: 100, // per hour
-    handler: async (prompt, model) => callOpenAI(env.OPENAI_KEY, prompt, model)
-  }
-});
-
-// In sandbox - capabilities are checked before execution
-await capability.storage.read('templates/react'); // ✅ Allowed
-await capability.storage.read('projects/other-user/secret'); // ❌ Denied
-```
-
-**Pros**:
-- Fine-grained permissions
-- Principle of least privilege
-- Self-documenting permissions
-
-**Cons**:
-- More complex to set up
-- Can become verbose with many capabilities
-- Might be overkill for simple use cases
-
----
-
-### Option 4: Proxy Object Pattern
-**Mental model**: "I'm creating a platform proxy with my secrets"
-
-```typescript
-// Worker code
-const sandbox = await createSecureSandbox(env.Sandbox, userId);
-
-// Create platform proxy
-const platform = new PlatformProxy(env);
-await sandbox.attachPlatform(platform);
-
-// PlatformProxy class (shared between Worker and SDK)
-class PlatformProxy {
-  constructor(private env: Env) {}
-  
-  @expose()  // Decorator marks method as callable from sandbox
-  async fetchTemplate(id: string) {
-    return await this.env.R2.get(`templates/${id}`);
-  }
-  
-  @expose({ rateLimit: 100 })
-  async queryDatabase(query: string) {
-    return await this.env.DB.prepare(query).run();
-  }
-  
-  // Not decorated = not exposed to sandbox
-  private async internalMethod() {
-    // This can't be called from sandbox
-  }
-}
-```
-
-**Pros**:
-- Very clean, class-based API
-- Decorators provide metadata
-- Easy to test and mock
-- Familiar OOP pattern
-
-**Cons**:
-- Requires decorators (experimental in TS)
-- More "magic" happening behind scenes
-- Need to ensure methods are serializable
-
----
-
-## Recommended Approach: Hybrid Service Provider
-
-Combining the best aspects:
-
-```typescript
-// 1. Define your platform services interface (shared types)
-interface PlatformServices {
-  storage: StorageService;
-  database: DatabaseService;
-  ai: AIService;
-}
-
-interface StorageService {
-  fetchTemplate(id: string): Promise<string>;
-  saveProject(name: string, data: string): Promise<void>;
-}
-
-// 2. In Worker - implement and provide services
 export default {
   async fetch(request: Request, env: Env) {
-    const sandbox = await createSecureSandbox(env.Sandbox, userId);
+    const sandbox = getSandbox(env.Sandbox, "user-123");
     
-    // Type-safe service implementation
-    const services: PlatformServices = {
-      storage: {
-        async fetchTemplate(id) {
-          const obj = await env.R2.get(`templates/${id}`);
-          if (!obj) throw new Error('Template not found');
-          return await obj.text();
-        },
-        async saveProject(name, data) {
-          await env.R2.put(`projects/${userId}/${name}`, data);
-        }
-      },
-      database: {
-        async getUsage() {
-          return await env.DB.prepare(
-            "SELECT * FROM usage WHERE user_id = ?"
-          ).bind(userId).first();
-        }
-      },
-      ai: {
-        async complete(prompt, options = {}) {
-          return await callOpenAI(env.OPENAI_KEY, prompt, options);
-        }
+    // Step 1: AI generates Lambda code in container
+    await sandbox.writeFile('/app/handler.js', aiGeneratedLambdaCode);
+    
+    // Step 2: Package in container (no secrets needed)
+    await sandbox.exec('zip function.zip handler.js node_modules/**');
+    
+    // Step 3: Pull package to Worker
+    const zipFile = await sandbox.readFile('/app/function.zip');
+    
+    // Step 4: Deploy from Worker using AWS SDK (has secrets)
+    const lambda = new AWS.Lambda({
+      accessKeyId: env.AWS_ACCESS_KEY,
+      secretAccessKey: env.AWS_SECRET
+    });
+    
+    await lambda.updateFunctionCode({
+      FunctionName: 'user-function',
+      ZipFile: zipFile.content
+    }).promise();
+  }
+}
+```
+
+**Pros:**
+- Completely secure - secrets never in container
+- Works today with current SDK
+
+**Cons:**
+- Can't use AWS CLI
+- Limited to operations that have SDK equivalents
+- Can't do complex AWS CLI operations (like SSM sessions)
+
+### Pattern 2: Temporary Credentials (Risky, Functional)
+
+**How it works**: Create short-lived credentials for specific operations
+
+```typescript
+// Worker code
+export default {
+  async fetch(request: Request, env: Env) {
+    const sandbox = getSandbox(env.Sandbox, "user-123");
+    
+    // Create very limited, short-lived credentials
+    const sts = new AWS.STS({
+      accessKeyId: env.AWS_ACCESS_KEY,
+      secretAccessKey: env.AWS_SECRET
+    });
+    
+    const tempCreds = await sts.assumeRole({
+      RoleArn: 'arn:aws:iam::123456:role/lambda-deploy-only',
+      RoleSessionName: `deploy-${Date.now()}`,
+      DurationSeconds: 300, // 5 minutes
+      Policy: JSON.stringify({
+        Version: '2012-10-17',
+        Statement: [{
+          Effect: 'Allow',
+          Action: ['lambda:UpdateFunctionCode'],
+          Resource: 'arn:aws:lambda:us-east-1:123456:function:user-*'
+        }]
+      })
+    }).promise();
+    
+    // Inject temporary credentials (RISKY - exposed to user code!)
+    await sandbox.setEnvVars({
+      AWS_ACCESS_KEY_ID: tempCreds.Credentials.AccessKeyId,
+      AWS_SECRET_ACCESS_KEY: tempCreds.Credentials.SecretAccessKey,
+      AWS_SESSION_TOKEN: tempCreds.Credentials.SessionToken
+    });
+    
+    // Now AWS CLI works
+    await sandbox.exec('aws lambda update-function-code --function-name user-func --zip-file fileb://function.zip');
+    
+    // Problem: Credentials remain exposed for 5 minutes!
+  }
+}
+```
+
+**Pros:**
+- AWS CLI works normally
+- Can do any AWS operation
+
+**Cons:**
+- Credentials exposed to user code (even if temporary)
+- Risk window of 5 minutes
+- User code could exfiltrate credentials
+
+### Pattern 3: Platform-Controlled Execution (Proposed)
+
+**How it works**: Use our control of the bun server to create isolated execution
+
+```typescript
+// New SDK API (what we could build)
+interface SecureSandbox extends Sandbox {
+  // Register credentials with the container's control plane
+  async registerPlatformCredentials(creds: Record<string, string>): Promise<void>;
+  
+  // Execute with just-in-time credential injection
+  async execSecure(command: string, options: {
+    credentials: string[], // Which credentials to inject
+    timeout: number,       // Max execution time
+    isolated: boolean      // Run in isolated context
+  }): Promise<ExecResult>;
+}
+
+// Worker code using new API
+export default {
+  async fetch(request: Request, env: Env) {
+    const sandbox = getSecureSandbox(env.Sandbox, "user-123");
+    
+    // Register credentials with container control plane (never in env!)
+    await sandbox.registerPlatformCredentials({
+      AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY,
+      AWS_SECRET_ACCESS_KEY: env.AWS_SECRET
+    });
+    
+    // AI generates and packages Lambda
+    await sandbox.writeFile('/app/handler.js', aiGeneratedCode);
+    await sandbox.exec('zip function.zip handler.js');
+    
+    // Deploy using AWS CLI with isolated credentials
+    await sandbox.execSecure(
+      'aws lambda update-function-code --function-name user-func --zip-file fileb://function.zip',
+      {
+        credentials: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'],
+        timeout: 30000,
+        isolated: true // User code can't see this process
       }
-    };
-    
-    // Attach services with optional middleware
-    await sandbox.providePlatformServices(services, {
-      middleware: [
-        rateLimiter({ max: 100, window: '1h' }),
-        logger({ level: 'info' }),
-        validator({ schemas: platformSchemas })
-      ]
-    });
-    
-    // Safe environment variables
-    await sandbox.setUserEnvironment({
-      NODE_ENV: 'production',
-      PUBLIC_API_URL: 'https://api.example.com'  // Safe to expose
-    });
-    
-    // Execute user code
-    return await sandbox.exec(userCode);
-  }
-}
-```
-
-```typescript
-// 3. In sandbox (what user/AI code sees)
-// This could be auto-injected or imported
-import { platform } from '@sandbox/platform';
-
-// Fully typed, auto-completed
-const template = await platform.storage.fetchTemplate('react-starter');
-const usage = await platform.database.getUsage();
-const response = await platform.ai.complete('Generate a React component');
-
-// Regular env vars (safe ones only)
-console.log(process.env.NODE_ENV); // 'production'
-console.log(process.env.OPENAI_KEY); // undefined - not exposed!
-```
-
-## Migration Strategy
-
-### Phase 1: Deprecation Warning
-```typescript
-class Sandbox {
-  async setEnvVars(vars: Record<string, string>) {
-    console.warn(
-      "⚠️ setEnvVars() is deprecated for secrets. " +
-      "Use providePlatformServices() for secret operations or " +
-      "setUserEnvironment() for safe variables. " +
-      "See: https://docs.../migration"
     );
     
-    // Detect likely secrets
-    const suspiciousKeys = Object.keys(vars).filter(k => 
-      /key|secret|token|password|credential/i.test(k)
-    );
+    // Credentials were only available during that specific command!
+  }
+}
+```
+
+**Implementation in our bun server:**
+
+```typescript
+// container_src/handlers/secure-exec.ts
+export async function handleSecureExec(req: Request) {
+  const { command, credentials, timeout, isolated } = await req.json();
+  
+  // Get credentials from secure storage (not process.env)
+  const creds = getSecureCredentials(credentials);
+  
+  if (isolated) {
+    // Create isolated process that user code can't inspect
+    const proc = spawn(command, {
+      env: { ...cleanEnv, ...creds },
+      detached: true,  // Run in separate process group
+      stdio: 'pipe'    // Don't inherit stdio
+    });
     
-    if (suspiciousKeys.length > 0) {
-      console.error(
-        "🚨 SECURITY WARNING: Detected potential secrets: " +
-        suspiciousKeys.join(', ')
-      );
-    }
+    // Prevent user code from accessing this process
+    hideProcessFromUserCode(proc.pid);
+    
+    // Auto-kill after timeout
+    setTimeout(() => proc.kill(), timeout);
+    
+    return collectOutput(proc);
+  } else {
+    // Regular execution with temporary credentials
+    return execWithTempEnv(command, creds, timeout);
   }
 }
 ```
 
-### Phase 2: Dual Mode
+**Pros:**
+- Credentials never in global environment
+- Very short exposure window
+- Can hide processes from user code
+- Works with any CLI tool
+
+**Cons:**
+- Requires SDK changes
+- Still some risk if not properly isolated
+
+## Comparison for AWS Deployment Scenario
+
+| Approach | Can Deploy Lambda? | Can Use AWS CLI? | Security Risk | Available Today? |
+|----------|-------------------|------------------|---------------|------------------|
+| Worker Orchestration | ✅ (via SDK) | ❌ | None | ✅ |
+| Temporary Credentials | ✅ | ✅ | High (5 min exposure) | ✅ |
+| Platform-Controlled | ✅ | ✅ | Low (millisecond exposure) | ❌ (needs implementation) |
+
+## Recommended Approach Today
+
+### For Maximum Security (Limited Functionality)
 ```typescript
-// Support both patterns during transition
-const sandbox = await createSecureSandbox(env.Sandbox, userId, {
-  mode: 'hybrid',  // or 'legacy' or 'secure'
-  allowLegacyEnvVars: true  // Must explicitly opt-in
-});
-```
-
-### Phase 3: Secure by Default
-```typescript
-// New API only
-const sandbox = await createSecureSandbox(env.Sandbox, userId);
-// sandbox.setEnvVars() no longer exists
-// Must use sandbox.providePlatformServices() and sandbox.setUserEnvironment()
-```
-
-## TypeScript Types
-
-```typescript
-// Platform service constraints
-type PlatformService = {
-  [method: string]: (...args: any[]) => Promise<any>;
-};
-
-type PlatformServices = {
-  [namespace: string]: PlatformService;
-};
-
-// Middleware types
-interface ServiceMiddleware {
-  before?(method: string, args: any[]): Promise<void>;
-  after?(method: string, result: any): Promise<any>;
-  onError?(method: string, error: Error): Promise<void>;
-}
-
-// Sandbox options
-interface SecureSandboxOptions {
-  mode?: 'secure' | 'hybrid' | 'legacy';
-  middleware?: ServiceMiddleware[];
-  timeout?: number;
-  maxConcurrentCalls?: number;
-}
-
-// Full API
-interface SecureSandbox {
-  // Platform operations (secrets)
-  providePlatformServices<T extends PlatformServices>(
-    services: T, 
-    options?: ServiceOptions
-  ): Promise<void>;
-  
-  // User environment (no secrets)
-  setUserEnvironment(vars: Record<string, string>): Promise<void>;
-  
-  // Execution
-  exec(command: string, options?: ExecOptions): Promise<ExecResult>;
-  runCode(code: string, options?: RunCodeOptions): Promise<CodeResult>;
-  
-  // Lifecycle
-  destroy(): Promise<void>;
-}
-```
-
-## Error Handling
-
-```typescript
-// Clear, actionable errors
-class PlatformServiceError extends Error {
-  constructor(
-    message: string,
-    public service: string,
-    public method: string,
-    public cause?: Error
-  ) {
-    super(`Platform service error in ${service}.${method}: ${message}`);
-  }
-}
-
-// Usage
-try {
-  await platform.storage.fetchTemplate('non-existent');
-} catch (error) {
-  if (error instanceof PlatformServiceError) {
-    console.error(`Failed to call ${error.service}.${error.method}`);
-    // Handle appropriately
+class AWSDeployer {
+  async deployLambda(sandbox: Sandbox, env: Env) {
+    // Package in container
+    await sandbox.exec('zip function.zip handler.js');
+    
+    // Pull to Worker
+    const zip = await sandbox.readFile('/app/function.zip');
+    
+    // Deploy from Worker
+    const lambda = new AWS.Lambda({
+      accessKeyId: env.AWS_ACCESS_KEY,
+      secretAccessKey: env.AWS_SECRET
+    });
+    
+    await lambda.updateFunctionCode({
+      FunctionName: 'my-function',
+      ZipFile: zip.content
+    }).promise();
   }
 }
 ```
 
-## Developer Experience Checklist
+### For Full Functionality (Accept Risk)
+```typescript
+class AWSDeployer {
+  async deployWithCLI(sandbox: Sandbox, env: Env) {
+    // Create minimal temporary credentials
+    const tempCreds = await this.getMinimalTempCredentials({
+      duration: 300,
+      permissions: ['lambda:UpdateFunctionCode'],
+      resources: ['arn:aws:lambda:*:*:function:my-function']
+    });
+    
+    // Wrapper script to minimize exposure
+    await sandbox.writeFile('/tmp/deploy.sh', `
+      #!/bin/bash
+      set -e
+      aws lambda update-function-code "$@"
+      # Clear credentials immediately after
+      unset AWS_ACCESS_KEY_ID
+      unset AWS_SECRET_ACCESS_KEY
+      exit $?
+    `);
+    
+    // Inject credentials (risky!)
+    await sandbox.setEnvVars(tempCreds);
+    
+    // Run quickly
+    await sandbox.exec('bash /tmp/deploy.sh --function-name my-function --zip-file fileb://function.zip');
+    
+    // Note: Credentials still in env for container lifetime
+  }
+}
+```
 
-- [ ] IntelliSense/autocomplete for all platform methods
-- [ ] Clear error messages with suggested fixes
-- [ ] Migration guide with code examples
-- [ ] Debug mode to log all platform calls
-- [ ] Mock implementations for testing
-- [ ] Rate limiting and quotas built-in
-- [ ] Audit logging for compliance
-- [ ] Gradual migration path
-- [ ] Examples for common use cases
-- [ ] VSCode extension for validation
+## What We Can Build (Leveraging Container Control)
 
-## Next Steps
+Since we control the bun server, we can implement:
 
-1. Prototype the Service Provider pattern
-2. Create TypeScript definitions
-3. Build middleware system
-4. Write migration tooling
-5. Create comprehensive examples
-6. Test with real use cases
+### 1. Credential Vault in Container
+```typescript
+// New endpoint in container_src/index.ts
+case "/api/vault/store":
+  // Store credentials in memory, never in env
+  credentialVault.store(await req.json());
+  break;
+
+case "/api/vault/exec":
+  // Execute with vaulted credentials
+  const { command, credKeys } = await req.json();
+  const creds = credentialVault.get(credKeys);
+  return execWithCreds(command, creds);
+```
+
+### 2. Process Isolation
+```typescript
+// Hide platform processes from user code
+case "/api/platform/exec":
+  const proc = spawn(command, {
+    env: platformEnv,
+    detached: true
+  });
+  
+  // Don't add to process list visible to user
+  platformProcesses.set(proc.pid, proc);
+  
+  return collectOutput(proc);
+```
+
+### 3. Just-In-Time Credentials
+```typescript
+// Inject credentials only for specific command
+case "/api/jit/exec":
+  const { command, duration } = await req.json();
+  
+  // Get credentials from DO
+  const creds = await requestCredentialsFromDO();
+  
+  // Run with timeout
+  const result = await Promise.race([
+    execWithEnv(command, creds),
+    sleep(duration).then(() => {
+      throw new Error('Command timeout');
+    })
+  ]);
+  
+  // Credentials gone after command completes
+  return result;
+```
+
+## Next Steps for Implementation
+
+1. **Immediate (What developers can do today)**:
+   - Use Worker orchestration for operations with SDK support
+   - Use temporary credentials when CLI is absolutely necessary
+   - Document security trade-offs clearly
+
+2. **Short-term (What we can build in SDK)**:
+   - Credential vault in container control plane
+   - Secure exec endpoint with JIT credentials
+   - Process isolation for platform operations
+
+3. **Long-term (What we need from Cloudflare platform)**:
+   - Linux namespace isolation per process
+   - Capability-based security model
+   - Kernel-level credential isolation
+
+## The Bottom Line
+
+**Is this solvable?** Yes, partially:
+- **Today**: Worker orchestration (secure but limited) OR temporary credentials (risky but functional)
+- **With SDK changes**: We can build secure execution using our container control
+- **With platform changes**: Full isolation becomes possible
+
+**Recommended approach**: Start with Worker orchestration, use temporary credentials only when absolutely necessary, and work towards implementing secure execution in the SDK.
