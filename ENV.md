@@ -176,14 +176,6 @@ Current issue: No boundary between Platform Layer and User Code Layer within the
 - Shell expansion and interpolation
 - Debugging interfaces
 
-## Questions to Explore
-
-1. **Separation Models**: Can we run platform code and user code in different contexts?
-2. **Proxy Pattern**: Can platform operations be proxied without exposing credentials?
-3. **Capability-Based Security**: Can we use capabilities instead of ambient authority?
-4. **Secret Injection**: Can secrets be injected only when needed, then removed?
-5. **Process Isolation**: Can we use separate processes with different environments?
-6. **API Gateway**: Should secret-requiring operations go through a separate API?
 
 ## Success Criteria
 
@@ -286,35 +278,6 @@ All Code Has Access ⚠️
    - Could introduce proxy methods for privileged operations
    - Authentication/authorization could be added at RPC layer
 
-### Potential Solution Approaches
-
-#### Approach 1: Proxy Pattern (Keep Secrets in Worker)
-- Never pass secrets to sandbox
-- Platform operations executed in Worker layer
-- Sandbox makes callbacks to Worker for privileged ops
-- Pros: Complete isolation, secrets never enter sandbox
-- Cons: Complex architecture, latency for privileged operations
-
-#### Approach 2: Secure Storage Service
-- Separate service/API for secret operations
-- Sandbox gets temporary tokens for specific operations
-- Secrets fetched just-in-time and used immediately
-- Pros: Flexible, auditable, revocable access
-- Cons: Additional infrastructure, complexity
-
-#### Approach 3: Dual Environment Contexts
-- Maintain two separate environment contexts
-- Platform context (with secrets) for platform operations
-- User context (clean) for user code execution
-- Pros: Simpler than proxy, maintains current API
-- Cons: Need to ensure contexts can't be mixed
-
-#### Approach 4: Capability-Based Security
-- Replace ambient environment variables with capabilities
-- Platform provides specific capabilities/tokens
-- Operations require explicit capability presentation
-- Pros: Principle of least privilege, explicit security
-- Cons: Major API redesign, breaking changes
 
 ## Our Leverage: Container Control
 
@@ -416,194 +379,8 @@ setTimeout(() => unlink(credFile), 100); // Delete after 100ms
 ```
 **Verdict:** Race conditions, still readable briefly
 
-## Detailed Solution Proposals
 
-### Solution 1: Platform Operations Proxy (Recommended)
 
-#### Concept
-Keep secrets in the Worker layer, never pass them to the sandbox. The sandbox requests privileged operations through RPC callbacks to the Worker.
-
-#### Implementation Approach
-
-```typescript
-// Worker Layer - holds secrets
-class PlatformWorker {
-  private secrets = {
-    R2_KEY: process.env.R2_KEY,
-    DB_URL: process.env.DATABASE_URL
-  };
-  
-  async handlePlatformOperation(op: PlatformOp) {
-    // Validate operation is allowed
-    // Use secrets to perform operation
-    // Return result without exposing secrets
-  }
-}
-
-// Sandbox Layer - no secrets
-class SecureSandbox extends Sandbox {
-  async executePlatformOperation(op: string, params: any) {
-    // Make RPC call back to Worker
-    return this.callWorker('platformOp', { op, params });
-  }
-}
-```
-
-#### Pros
-- Complete isolation - secrets never enter sandbox
-- Clear security boundary at Worker/DO interface
-- Auditable - all privileged ops go through single point
-- No changes needed to container implementation
-
-#### Cons
-- Requires bidirectional RPC (DO → Worker callbacks)
-- Latency for platform operations
-- More complex Worker implementation
-
-### Solution 2: Separate Execution Contexts
-
-#### Concept
-Maintain two separate execution environments within the container - one for platform code (with secrets) and one for user code (without).
-
-#### Implementation Approach
-
-```typescript
-// Modified container handler
-class DualContextHandler {
-  private platformEnv = { ...process.env, ...platformSecrets };
-  private userEnv = { ...process.env }; // Clean environment
-  
-  executeCommand(cmd: string, context: 'platform' | 'user') {
-    const env = context === 'platform' ? this.platformEnv : this.userEnv;
-    return spawn(cmd, { env });
-  }
-}
-```
-
-#### Pros
-- Simpler than proxy pattern
-- Platform operations stay in container
-- Minimal API changes
-
-#### Cons
-- Risk of context confusion/mixing
-- Requires careful command routing
-- Still requires container modifications
-
-### Solution 3: Secret Injection Service
-
-#### Concept
-Secrets are stored in a separate service. The sandbox gets temporary, scoped tokens to access specific secrets for specific operations.
-
-#### Implementation Approach
-
-```typescript
-// Secret Service (could be KV, D1, or external)
-class SecretService {
-  async getSecret(token: string): Promise<string | null> {
-    // Validate token, check expiry, scope
-    // Return secret if authorized
-  }
-}
-
-// Platform operation with temporary token
-async function fetchTemplate(sandbox: Sandbox, templateId: string) {
-  const token = await generateScopedToken('R2_READ', { templateId });
-  await sandbox.exec(`
-    SECRET=$(curl -H "Auth: ${token}" ${SECRET_SERVICE_URL}/get-secret)
-    aws s3 cp s3://templates/${templateId} . --secret-key=$SECRET
-  `);
-}
-```
-
-#### Pros
-- Fine-grained access control
-- Revocable/expiring access
-- Audit trail of secret access
-- Could use existing Cloudflare services
-
-#### Cons
-- Additional infrastructure
-- Complexity of token management
-- Still exposes secrets temporarily in container
-
-### Solution 4: Platform SDK Pattern
-
-#### Concept
-Provide a platform SDK/library that runs inside the container but communicates with external services for privileged operations.
-
-#### Implementation Approach
-
-```typescript
-// Platform SDK injected into container
-const platformSDK = {
-  async fetchTemplate(templateId: string) {
-    // This SDK has embedded auth token (not user-accessible secret)
-    const response = await fetch(`${PLATFORM_API}/templates/${templateId}`, {
-      headers: { 'X-Platform-Auth': this.authToken }
-    });
-    return response.blob();
-  }
-};
-
-// User code can call SDK methods but not access secrets
-await platformSDK.fetchTemplate('my-template');
-```
-
-#### Pros
-- Clean API for developers
-- Secrets stay in platform services
-- Can implement complex authorization logic
-
-#### Cons
-- Requires platform API infrastructure
-- Network latency for operations
-- SDK needs to be injected securely
-
-## Implementation Recommendation
-
-### Phase 1: Immediate Mitigation
-1. Document the security limitation clearly
-2. Provide guidance on not using `setEnvVars` for secrets
-3. Implement logging/monitoring for env var access
-
-### Phase 2: Short-term Solution
-Implement **Solution 1 (Platform Operations Proxy)** because:
-- No changes to container code required
-- Clear security boundary
-- Can be implemented incrementally
-- Backward compatible with deprecation path
-
-### Phase 3: Long-term Architecture
-Combine **Solutions 1 & 4** to create:
-- Platform operations stay in Worker (Solution 1)
-- User-friendly SDK for common operations (Solution 4)
-- Optional secret service for complex scenarios (Solution 3)
-
-## API Design Proposal
-
-### Current (Insecure) API
-```typescript
-await sandbox.setEnvVars({ SECRET: 'value' });
-await sandbox.exec('echo $SECRET'); // Exposed!
-```
-
-### Proposed Secure API
-```typescript
-// Option 1: Platform operations
-await sandbox.platformExec('fetch-template', { 
-  templateId: 'react-starter' 
-});
-
-// Option 2: Capability-based
-const capability = await createCapability('R2_READ', ['templates/*']);
-await sandbox.execWithCapability('fetch-template.sh', capability);
-
-// Option 3: User env vars (safe)
-await sandbox.setUserEnvVars({ 
-  NODE_ENV: 'production' // Non-secret user config
-});
-```
 
 ## Migration Path
 
@@ -822,33 +599,6 @@ describe('Environment Variable Security', () => {
 - Security warning occurrences
 - Migration adoption rate
 
-## Alternative Consideration: Separate Services
-
-### Option: Run Platform Code Outside Sandbox
-Instead of trying to secure within the sandbox, run platform operations entirely outside:
-
-```typescript
-// Worker handles all platform operations
-class PlatformWorker {
-  async handleRequest(request: Request) {
-    const { operation, params } = await request.json();
-    
-    switch(operation) {
-      case 'fetch-template':
-        // Use R2 credentials here
-        return this.fetchFromR2(params.templateId);
-      
-      case 'run-user-code':
-        // Delegate to sandbox without any secrets
-        const sandbox = getSandbox(this.env.Sandbox, params.sandboxId);
-        return sandbox.exec(params.command);
-    }
-  }
-}
-```
-
-**Pros**: Complete isolation, simpler security model
-**Cons**: Requires restructuring application architecture
 
 ## Real-World Tool Integration Challenge
 
@@ -1091,62 +841,6 @@ The Container class directly sets environment variables that become part of `pro
 - Can batch operations to reduce round trips
 - Promise pipelining can optimize sequential calls
 
-## Updated Implementation Plan
-
-### Phase 1: POC with RPC Callbacks
-```typescript
-// 1. Extend Sandbox to support platform callbacks
-class SecureSandbox extends Container {
-  private platformOps?: PlatformOperations;
-  
-  async setPlatformOperations(ops: PlatformOperations) {
-    this.platformOps = ops;
-  }
-  
-  // Internal method for platform SDK
-  protected async callPlatform(op: string, params: any) {
-    if (!this.platformOps) throw new Error("Platform not initialized");
-    return await this.platformOps.execute(op, params);
-  }
-}
-
-// 2. Platform Operations interface
-interface PlatformOperations {
-  execute(operation: string, params: any): Promise<any>;
-}
-
-// 3. Worker implementation
-const sandbox = getSandbox(env.Sandbox, userId);
-await sandbox.setPlatformOperations({
-  async execute(op, params) {
-    // Access secrets here in Worker context
-    switch(op) {
-      case 'r2-fetch':
-        return await env.R2.get(params.key);
-    }
-  }
-});
-```
-
-### Phase 2: User-Friendly API
-```typescript
-// Wrap complex operations in simple methods
-class SecureSandbox extends Container {
-  async fetchTemplate(templateId: string) {
-    return this.callPlatform('fetch-template', { templateId });
-  }
-  
-  async saveProject(data: ProjectData) {
-    return this.callPlatform('save-project', { data });
-  }
-}
-```
-
-### Phase 3: Security Hardening
-- Add operation whitelisting
-- Implement rate limiting
-- Add audit logging
-- Validate all parameters
 
 ## What We Can Build in the SDK
 
@@ -1392,9 +1086,8 @@ app.get('/info', (req, res) => {
 app.listen(3000);
 ```
 
-### Proposed Secure Implementation
+### Proposed Secure Implementation Using RPC Callbacks
 
-#### Option 1: Platform Operations Proxy
 ```typescript
 // Worker code - Secrets stay here
 export default {
@@ -1402,59 +1095,32 @@ export default {
     const { prompt } = await request.json();
     const sandbox = getSandbox(env.Sandbox, userId);
     
-    // Register platform operations handler
-    sandbox.onPlatformOperation = async (op, params) => {
+    // Leverage Cloudflare RPC callback capability!
+    // DO can call back to Worker functions
+    await sandbox.registerPlatformCallback(async (op, params) => {
+      // This runs in Worker context with access to secrets
       switch(op) {
         case 'fetch-template':
-          // Use R2 credentials HERE, not in sandbox
           return await env.R2.get(params.templateId);
         
         case 'save-project':
-          // Use database HERE
           return await env.DB.prepare('INSERT INTO projects...').run(params);
         
-        case 'ai-complete':
-          // Use OpenAI API HERE
-          return await callOpenAI(env.OPENAI_API_KEY, params);
+        case 'deploy-aws':
+          // Use AWS SDK with real credentials in Worker
+          const lambda = new AWS.Lambda({
+            accessKeyId: env.AWS_ACCESS_KEY,
+            secretAccessKey: env.AWS_SECRET
+          });
+          return await lambda.updateFunctionCode(params).promise();
       }
-    };
-    
-    // Set only non-sensitive user config
-    await sandbox.setUserEnvVars({
-      NODE_ENV: 'production',
-      PORT: '3000'
     });
     
-    // User code CANNOT access platform secrets
+    // User code runs without any platform secrets
     const aiResponse = await generateCode(prompt);
     await sandbox.exec(aiResponse.code);
   }
 }
-
-// In sandbox, platform operations are proxied
-await platformOp('fetch-template', { templateId: 'react-starter' });
-// Returns template content without exposing R2 credentials
-```
-
-#### Option 2: Capability-Based Access
-```typescript
-// Worker creates limited-scope capabilities
-const templateCapability = await createCapability({
-  service: 'R2',
-  permissions: ['read'],
-  resources: ['templates/*'],
-  expiry: Date.now() + 3600000 // 1 hour
-});
-
-// Pass capability to sandbox (not the actual secret)
-await sandbox.grantCapability('template-reader', templateCapability);
-
-// In sandbox, use capability
-const template = await useCapability('template-reader', {
-  action: 'fetch',
-  resource: 'templates/react-starter'
-});
-// Capability is validated and operation performed without exposing R2 key
 ```
 
 ### Real-World Impact
