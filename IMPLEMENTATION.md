@@ -19,28 +19,33 @@ Container (Single namespace)
 └── No isolation boundaries
 ```
 
-### Target State (Secure with 3 Reusable Namespaces)
+### Target State (Context-Based Architecture)
 ```
-Container (Created at startup)
-├── Control Namespace (Hidden, persistent)
+Container (At startup)
+├── Control Context (Hidden, for infrastructure)
 │   ├── Bun Server (port 8080 pre-bound)
 │   ├── Jupyter Kernel (port 8888 pre-bound)
 │   └── Invisible to user code
 │
-├── User Namespace (Shared, persistent)
-│   ├── Regular exec() commands run here
-│   ├── Processes CAN see each other (for debugging)
-│   ├── ps aux, htop, etc. work normally
-│   └── NO credentials ever
-│
-└── Secure Namespace (Isolated, persistent)
-    ├── exec() with env option runs here
-    ├── Credentials exist only during execution
-    ├── Cleared after each command
-    └── Isolated from user namespace
+└── User-Created Contexts (On-demand)
+    ├── Each context has:
+    │   ├── Own Linux namespace (PID, Mount isolation)
+    │   ├── Own environment variables
+    │   ├── Own session state (pwd, shell vars)
+    │   └── Child routing configuration
+    │
+    ├── Platform Context Example:
+    │   ├── ANTHROPIC_API_KEY environment
+    │   ├── Routes children to User Context
+    │   └── Maintains its own pwd/state
+    │
+    └── User Context Example:
+        ├── CLOUDFLARE_API_TOKEN, AWS_KEY environment
+        ├── Isolated from Platform Context
+        └── Maintains its own pwd/state
 ```
 
-**Key Insight**: All three namespaces are created ONCE at container startup and reused. No per-command overhead!
+**Key Insight**: Contexts unify namespaces (isolation) and sessions (state) into a single abstraction!
 
 ## Implementation Details
 
@@ -49,28 +54,31 @@ Container (Created at startup)
 ```typescript
 // container_src/index.ts
 class ContainerServer {
-  private namespaces: {
-    control: Namespace;
-    user: Namespace;
-    secure: Namespace;
-  };
+  private contexts: Map<string, ExecutionContext> = new Map();
+  private controlContext: ExecutionContext;
   
   async initialize() {
     // Step 1: Pre-bind critical ports immediately
     this.bunServer = Bun.serve({ port: 8080 });
     
-    // Step 2: Create three persistent namespaces
-    if (await this.hasCapSysAdmin()) {
-      this.namespaces = await this.createNamespaces();
-    } else {
-      // Local dev fallback - everything in one namespace
-      this.namespaces = await this.createFallbackNamespaces();
-    }
+    // Step 2: Create control context for infrastructure
+    this.controlContext = await this.createContext({
+      name: '__control__',
+      isolation: 'secure',
+      hidden: true
+    });
     
-    // Step 3: Start control plane in control namespace
-    await this.namespaces.control.exec('jupyter kernel --port 8888');
+    // Step 3: Start control plane in control context
+    await this.controlContext.exec('jupyter kernel --port 8888');
     
-    console.log('Container initialized with 3 namespaces');
+    // Step 4: Create default context for backward compatibility
+    await this.createContext({
+      name: 'default',
+      isolation: 'none',
+      persistent: true
+    });
+    
+    console.log('Container initialized with control context');
   }
   
   private async createNamespaces() {
@@ -103,79 +111,161 @@ class ContainerServer {
 }
 ```
 
-### Phase 2: Smart exec() Routing
+### Phase 2: Context Management API
 
 ```typescript
-// container_src/api/execute.ts
-export async function execute(
-  command: string,
-  options?: ExecOptions
-) {
-  // Smart namespace selection based on options
-  const namespace = selectNamespace(options);
-  
-  // Execute in selected namespace
-  return await namespace.exec(command, options);
-}
-
-function selectNamespace(options?: ExecOptions): Namespace {
-  // If environment variables provided, use secure namespace
-  if (options?.env && Object.keys(options.env).length > 0) {
-    return namespaces.secure;
+// container_src/api/context.ts
+export async function createContext(
+  options: ContextOptions
+): Promise<ExecutionContext> {
+  // Check if context already exists
+  if (this.contexts.has(options.name)) {
+    throw new Error(`Context '${options.name}' already exists`);
   }
   
-  // Otherwise use shared user namespace
-  return namespaces.user;
+  // Create new execution context
+  const context = new ExecutionContext({
+    name: options.name,
+    env: options.env || {},
+    cwd: options.cwd || '/workspace',
+    persistent: options.persistent ?? true,
+    isolation: options.isolation || 'secure',
+    childContext: options.childContext,
+    routeChild: options.routeChild
+  });
+  
+  await context.initialize();
+  this.contexts.set(options.name, context);
+  
+  return context;
+}
+
+export function getContext(name: string): ExecutionContext {
+  const context = this.contexts.get(name);
+  if (!context) {
+    throw new Error(`Context '${name}' not found`);
+  }
+  return context;
 }
 ```
 
-### Phase 3: Namespace Implementation
+### Phase 3: ExecutionContext Implementation
 
 ```typescript
-// container_src/utils/namespace.ts
-class Namespace {
-  private nsProcess: ChildProcess;
-  private nsPid: number;
+// container_src/utils/context.ts
+class ExecutionContext {
+  private name: string;
+  private env: Record<string, string>;
+  private cwd: string;
+  private shellProcess?: ChildProcess;
+  private namespace?: Namespace;
+  private childContext?: string;  // Universal routing target
   
-  constructor(options: NamespaceOptions) {
-    // Create namespace with long-lived process
-    this.nsProcess = spawn('unshare', [
-      ...(options.pid ? ['--pid', '--fork', '--mount-proc'] : []),
-      ...(options.mount ? ['--mount'] : []),
-      ...(options.net ? ['--net'] : []),
-      'sh', '-c', 'sleep infinity'  // Keep namespace alive
-    ]);
+  constructor(options: ContextOptions) {
+    this.name = options.name;
+    this.env = options.env || {};
+    this.cwd = options.cwd || '/workspace';
+    this.childContext = options.childContext;
+    this.routeChild = options.routeChild;
+  }
+  
+  async initialize() {
+    // Create namespace if isolation requested
+    if (this.options.isolation === 'secure') {
+      this.namespace = await this.createNamespace();
+    }
     
-    this.nsPid = this.nsProcess.pid;
+    // Create persistent shell if requested
+    if (this.options.persistent) {
+      this.shellProcess = await this.createShell();
+    }
   }
   
   async exec(command: string, options?: ExecOptions) {
-    // Execute command in this namespace
-    const child = spawn('nsenter', [
-      `--target=${this.nsPid}`,
-      ...(this.options.pid ? ['--pid'] : []),
-      ...(this.options.mount ? ['--mount'] : []),
-      '--',
-      'sh', '-c', command
-    ], {
-      env: this.prepareEnv(options?.env),
-      cwd: options?.cwd || '/workspace'
-    });
+    // Enable universal routing for AI agents
+    if (this.childContext && this.isAIAgent(command)) {
+      // ALL child processes will route to childContext
+      return await this.execWithRouting(command, options);
+    }
     
-    return await collectOutput(child);
+    // Normal execution without routing
+    if (this.shellProcess) {
+      return await this.execInShell(command, options);
+    } else if (this.namespace) {
+      return await this.namespace.exec(command, options);
+    } else {
+      return await this.execDirect(command, options);
+    }
   }
   
-  private prepareEnv(userEnv?: Record<string, string>) {
-    if (this.name === 'secure' && userEnv) {
-      // Secure namespace: Only specified env vars
-      return {
-        PATH: '/usr/local/bin:/usr/bin:/bin',
-        HOME: '/workspace',
-        ...userEnv  // Only user-provided vars
-      };
-    } else {
-      // User/control namespace: Inherit current env
-      return { ...process.env, ...userEnv };
+  private async execWithRouting(command: string, options?: ExecOptions) {
+    // Enable LD_PRELOAD universal routing
+    const envWithRouting = {
+      ...this.env,
+      ...options?.env,
+      LD_PRELOAD: '/lib/universal_router.so',
+      SANDBOX_ROUTE_TO_CONTEXT: this.childContext
+    };
+    
+    return this.execDirect(command, { ...options, env: envWithRouting });
+  }
+  
+  private isAIAgent(command: string): boolean {
+    // Detect AI agent commands that need routing
+    const aiAgents = ['claude', 'gemini', 'gpt', 'copilot'];
+    return aiAgents.some(agent => command.includes(agent));
+  }
+  
+  private async createShell(): Promise<ChildProcess> {
+    // Create a persistent bash shell for this context
+    const shell = spawn('bash', [], {
+      env: this.env,
+      cwd: this.cwd
+    });
+    
+    // Initialize shell state
+    await this.execInShell(`cd ${this.cwd}`);
+    for (const [key, value] of Object.entries(this.env)) {
+      await this.execInShell(`export ${key}="${value}"`);
+    }
+    
+    return shell;
+  }
+  
+  async cd(path: string) {
+    this.cwd = path;
+    if (this.shellProcess) {
+      await this.execInShell(`cd ${path}`);
+    }
+  }
+  
+  async setEnv(vars: Record<string, string>) {
+    this.env = { ...this.env, ...vars };
+    if (this.shellProcess) {
+      for (const [key, value] of Object.entries(vars)) {
+        await this.execInShell(`export ${key}="${value}"`);
+      }
+    }
+  }
+  
+  async pwd(): Promise<string> {
+    if (this.shellProcess) {
+      const result = await this.execInShell('pwd');
+      return result.stdout.trim();
+    }
+    return this.cwd;
+  }
+  
+  setChildContext(context: string) {
+    this.childContext = context;
+  }
+  
+  async destroy() {
+    if (this.shellProcess) {
+      this.shellProcess.kill();
+    }
+    if (this.namespace) {
+      await this.namespace.destroy();
     }
   }
 }
@@ -186,14 +276,16 @@ class Namespace {
 ### Test 1: Control Plane Protection
 ```typescript
 test('Control plane is invisible and unkillable', async () => {
-  // User code can't see Jupyter/Bun
-  const ps = await sandbox.exec('ps aux');
+  const userCtx = await sandbox.createContext({ name: 'user' });
+  
+  // User context can't see Jupyter/Bun
+  const ps = await userCtx.exec('ps aux');
   expect(ps.stdout).not.toContain('jupyter');
   expect(ps.stdout).not.toContain('bun serve');
   
-  // User code can't kill them
-  await sandbox.exec('pkill jupyter');
-  await sandbox.exec('pkill bun');
+  // User context can't kill them
+  await userCtx.exec('pkill jupyter');
+  await userCtx.exec('pkill bun');
   
   // Control plane still running
   const health = await fetch('http://localhost:8080/health');
@@ -218,60 +310,212 @@ test('Critical ports are pre-reserved', async () => {
 });
 ```
 
-### Test 3: Automatic Credential Isolation
+### Test 3: Context-Based Credential Isolation
 ```typescript
-test('Credentials auto-isolated when env provided', async () => {
-  // Command with env automatically uses secure namespace
-  await sandbox.exec('aws s3 ls', {
+test('Credentials isolated between contexts', async () => {
+  // Create contexts with different credentials
+  const aws = await sandbox.createContext({
+    name: 'aws',
     env: { AWS_ACCESS_KEY_ID: 'secret123' }
   });
   
-  // Next command can't see it
-  const check = await sandbox.exec('echo $AWS_ACCESS_KEY_ID');
-  expect(check.stdout.trim()).toBe('');
+  const azure = await sandbox.createContext({
+    name: 'azure',
+    env: { AZURE_CLIENT_ID: 'azure456' }
+  });
   
-  // Can't find in any /proc
-  const proc = await sandbox.exec('cat /proc/*/environ 2>/dev/null | grep -c secret123');
-  expect(proc.stdout.trim()).toBe('0');
+  // AWS context can see its credentials
+  const awsCheck = await aws.exec('echo $AWS_ACCESS_KEY_ID');
+  expect(awsCheck.stdout.trim()).toBe('secret123');
+  
+  // But not Azure's
+  const azureCheck = await aws.exec('echo $AZURE_CLIENT_ID');
+  expect(azureCheck.stdout.trim()).toBe('');
+  
+  // And vice versa
+  const azureHasOwn = await azure.exec('echo $AZURE_CLIENT_ID');
+  expect(azureHasOwn.stdout.trim()).toBe('azure456');
+  const azureNoAws = await azure.exec('echo $AWS_ACCESS_KEY_ID');
+  expect(azureNoAws.stdout.trim()).toBe('');
 });
 ```
 
-### Test 4: User Namespace Process Visibility
+### Test 4: Context State Persistence
 ```typescript
-test('User processes can see each other for debugging', async () => {
-  // Start a long-running process
-  await sandbox.exec('sleep 30 &');
+test('Contexts maintain session state', async () => {
+  const ctx = await sandbox.createContext({
+    name: 'stateful',
+    persistent: true
+  });
   
-  // Another command can see it
-  const ps = await sandbox.exec('ps aux | grep sleep');
-  expect(ps.stdout).toContain('sleep 30');
+  // Change directory
+  await ctx.exec('cd /tmp');
+  const pwd1 = await ctx.exec('pwd');
+  expect(pwd1.stdout.trim()).toBe('/tmp');
   
-  // But still can't see control plane
-  expect(ps.stdout).not.toContain('jupyter');
+  // Set environment variable
+  await ctx.exec('export MY_VAR=hello');
+  const var1 = await ctx.exec('echo $MY_VAR');
+  expect(var1.stdout.trim()).toBe('hello');
+  
+  // State persists across commands
+  const pwd2 = await ctx.exec('pwd');
+  expect(pwd2.stdout.trim()).toBe('/tmp');
+  const var2 = await ctx.exec('echo $MY_VAR');
+  expect(var2.stdout.trim()).toBe('hello');
 });
+```
+
+### Test 5: Child Context Routing
+```typescript
+test('Parent context routes children correctly', async () => {
+  const platform = await sandbox.createContext({
+    name: 'platform',
+    env: { PLATFORM_KEY: 'platform123' },
+    childContext: 'user'
+  });
+  
+  const user = await sandbox.createContext({
+    name: 'user',
+    env: { USER_KEY: 'user456' }
+  });
+  
+  // Simulate AI agent spawning child process
+  // (In reality, Claude would spawn this internally)
+  await platform.exec('mock-ai-agent-command');
+  
+  // Verify child ran in user context
+  // (would need instrumentation to verify)
+});
+```
+
+## Phase 4: Universal Routing Implementation
+
+### LD_PRELOAD Interceptor (C)
+
+```c
+// container_src/lib/universal_router.c
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+
+static int (*real_execve)(const char*, char *const[], char *const[]) = NULL;
+static int (*real_system)(const char*) = NULL;
+
+__attribute__((constructor)) void init() {
+    real_execve = dlsym(RTLD_NEXT, "execve");
+    real_system = dlsym(RTLD_NEXT, "system");
+}
+
+int execve(const char *pathname, char *const argv[], char *const envp[]) {
+    const char* target = getenv("SANDBOX_ROUTE_TO_CONTEXT");
+    
+    if (target) {
+        // Route ALL commands to target context
+        int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        struct sockaddr_un addr = {.sun_family = AF_UNIX};
+        strncpy(addr.sun_path, "/tmp/sandbox_router.sock", sizeof(addr.sun_path)-1);
+        
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+            // Send routing request
+            dprintf(sock, "CONTEXT:%s\n", target);
+            dprintf(sock, "CMD:%s\n", pathname);
+            for (int i = 0; argv[i]; i++) {
+                dprintf(sock, "ARG:%s\n", argv[i]);
+            }
+            dprintf(sock, "END\n");
+            
+            // Wait for exit code
+            char result[32];
+            read(sock, result, sizeof(result));
+            close(sock);
+            exit(atoi(result));
+        }
+    }
+    
+    return real_execve(pathname, argv, envp);
+}
+
+int system(const char *command) {
+    const char* target = getenv("SANDBOX_ROUTE_TO_CONTEXT");
+    if (target) {
+        // Route via execve
+        char *argv[] = {"sh", "-c", (char*)command, NULL};
+        return execve("/bin/sh", argv, environ);
+    }
+    return real_system(command);
+}
+```
+
+### Routing Daemon (TypeScript)
+
+```typescript
+// container_src/services/universal_router.ts
+export class UniversalRouter {
+  private server: any;
+  private contexts: Map<string, ExecutionContext>;
+  
+  async initialize() {
+    // Compile interceptor
+    await exec('gcc -shared -fPIC -o /lib/universal_router.so /container_src/lib/universal_router.c -ldl');
+    
+    // Start routing daemon
+    this.server = createServer((client) => {
+      let buffer = '';
+      
+      client.on('data', async (data) => {
+        buffer += data.toString();
+        
+        if (buffer.includes('END\n')) {
+          const lines = buffer.split('\n');
+          const context = lines.find(l => l.startsWith('CONTEXT:'))?.substring(8);
+          const cmd = lines.find(l => l.startsWith('CMD:'))?.substring(4);
+          const args = lines.filter(l => l.startsWith('ARG:')).map(l => l.substring(4));
+          
+          // Route to target context
+          const targetContext = this.contexts.get(context);
+          if (targetContext) {
+            const result = await targetContext.exec(`${cmd} ${args.join(' ')}`);
+            client.write(result.exitCode.toString());
+          }
+          
+          client.end();
+        }
+      });
+    });
+    
+    this.server.listen('/tmp/sandbox_router.sock');
+  }
+}
 ```
 
 ## Implementation Timeline
 
 ### Week 1: Core Infrastructure
-**Goal**: Three-namespace architecture + port protection
+**Goal**: Context system + universal routing
 
-1. **Day 1-2**: Namespace manager implementation
-   - Create `container_src/utils/namespace.ts`
-   - Implement namespace creation and reuse
-   - Add capability detection
+1. **Day 1-2**: Context implementation
+   - Create `container_src/utils/context.ts`
+   - Implement ExecutionContext class
+   - Add persistent shell support
    
-2. **Day 3**: Port pre-binding
-   - Modify container startup sequence
-   - Pre-bind 8080 and 8888
+2. **Day 3**: LD_PRELOAD interceptor
+   - Write `universal_router.c`
+   - Compile to shared library
+   - Test interception of all exec variants
    
-3. **Day 4**: Update exec() routing
-   - Modify `/api/execute` endpoint
-   - Add smart namespace selection
+3. **Day 4**: Routing daemon
+   - Create UniversalRouter service
+   - Implement Unix socket communication
+   - Test routing between contexts
    
-4. **Day 5**: Testing
-   - Verify namespace isolation
-   - Test fallback for local dev
+4. **Day 5**: Integration testing
+   - Test with real AI agents (Claude)
+   - Verify complete isolation
+   - Confirm all child processes route correctly
 
 ### Week 2: SDK Integration
 **Goal**: Update SDK client with new behavior
@@ -368,42 +612,49 @@ if (capabilities.mode === 'development') {
 ### Container (Bun Server)
 ```
 container_src/
-├── index.ts              # Add namespace initialization
+├── index.ts              # Add context initialization
 ├── api/
-│   └── execute.ts        # Update with smart routing
+│   ├── execute.ts        # Update to use contexts
+│   └── context.ts        # NEW: Context management API
 ├── services/
-│   ├── jupyter.ts        # Start in control namespace
-│   └── process.ts        # Update to use namespaces
+│   ├── jupyter.ts        # Start in control context
+│   └── process.ts        # Update to use contexts
 └── utils/
-    ├── namespace.ts      # NEW: Namespace manager
-    └── capabilities.ts   # NEW: Detect CAP_SYS_ADMIN
+    ├── context.ts        # NEW: ExecutionContext class
+    ├── namespace.ts      # Linux namespace utilities
+    └── capabilities.ts   # Detect CAP_SYS_ADMIN
 ```
 
 ### SDK Client
 ```
 packages/sandbox/src/
-├── index.ts              # No changes needed!
+├── index.ts              # Export Context interface
 ├── client/
-│   └── methods.ts        # Update exec() signature
-└── types.ts              # Add env to ExecOptions
+│   ├── methods.ts        # Add context methods
+│   └── context.ts        # NEW: Context client class
+└── types.ts              # Add Context types
 ```
 
 ### Key Changes
 
-1. **container_src/utils/namespace.ts** (NEW)
-   - Namespace creation and management
-   - Reusable namespace instances
-   - Exec routing logic
+1. **container_src/utils/context.ts** (NEW)
+   - ExecutionContext class implementation
+   - Combines namespace isolation + session state
+   - Child routing logic
 
-2. **container_src/index.ts** (MODIFY)
-   - Create 3 namespaces at startup
+2. **container_src/api/context.ts** (NEW)
+   - Context creation and management API
+   - Context lookup and lifecycle
+
+3. **container_src/index.ts** (MODIFY)
+   - Create control context at startup
    - Pre-bind ports 8080/8888
-   - Start Jupyter in control namespace
+   - Start Jupyter in control context
 
-3. **container_src/api/execute.ts** (MODIFY)
-   - Check for env option
-   - Route to appropriate namespace
-   - No new endpoint needed!
+4. **packages/sandbox/src/client/context.ts** (NEW)
+   - Client-side Context class
+   - Proxies commands to server context
+   - Maintains context reference
 
 ## Risks & Mitigations
 

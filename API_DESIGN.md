@@ -10,82 +10,171 @@ We're focusing ONLY on issues that break the sandbox:
 
 Everything else (resource limits, metadata endpoints, etc.) is nice-to-have but not urgent.
 
-## API Design Decision: Single Unified exec() Method
+## API Design Evolution
 
-After careful analysis, we've decided on a **single exec() method** that automatically provides security based on context.
+### What We Learned
 
-### The Simplified API
+Our initial design of "env triggers secure namespace" was too simplistic. Real-world use cases revealed:
+
+1. **Multi-tenancy Requirements**: Platform developers need THEIR credentials (e.g., Anthropic API key) while end-users need DIFFERENT credentials (e.g., Cloudflare tokens)
+2. **Nested Execution**: AI agents like Claude Code need platform credentials, but their child processes need user credentials
+3. **Session State**: Users expect persistent state (pwd, env vars) across commands
+4. **Explicit is Better**: Auto-magical credential routing based on command patterns is fragile
+5. **Universal Routing**: AI agents NEVER need to run commands in platform context - ALL child processes should route to user context
+6. **No Pattern Matching**: Detecting specific commands ('wrangler', 'aws', etc.) is unmaintainable - route everything instead
+
+### The Solution: Contexts as First-Class Citizens
+
+We're unifying namespaces (isolation) and sessions (state) into **Execution Contexts** - explicit, stateful environments with their own credentials.
+
+#### Key Insight: Universal Child Routing
+
+After extensive analysis, we discovered that AI agents (Claude, Gemini, etc.) never need to execute commands in their own platform context. This simplifies routing dramatically:
+
+- AI agent runs in platform context (has ANTHROPIC_API_KEY)
+- ALL child processes route to user context (has CLOUDFLARE_API_TOKEN, AWS_KEY, etc.)
+- No pattern matching or command detection needed
+- Complete isolation maintained automatically
+
+### The Context-Based API
 
 ```typescript
 interface Sandbox {
-  // One method to rule them all!
-  exec(
-    command: string, 
-    options?: ExecOptions
-  ): Promise<ExecResult>;
+  // Context management (primary API)
+  createContext(options: ContextOptions): Promise<Context>;
+  context(name: string): Context;
+  hasContext(name: string): boolean;
+  listContexts(): string[];
   
-  // Existing methods remain
+  // Legacy/convenience methods (use default context)
+  exec(command: string): Promise<ExecResult>;
   setEnvVars(vars: Record<string, string>): Promise<void>;
 }
 
-interface ExecOptions {
-  // When env is provided, automatically uses secure namespace
-  env?: Record<string, string>;
+interface Context {
+  // Execution
+  exec(command: string, options?: ExecOptions): Promise<ExecResult>;
+  execStream(command: string, options?: ExecOptions): Promise<ReadableStream>;
+  startProcess(command: string, options?: ExecOptions): Promise<Process>;
   
-  // Standard options
-  cwd?: string;
-  timeout?: number;
-  sessionId?: string;
+  // Environment management
+  setEnv(vars: Record<string, string>): Promise<void>;
+  getEnv(key?: string): Promise<Record<string, string> | string>;
+  
+  // Session state
+  cd(path: string): Promise<void>;
+  pwd(): Promise<string>;
+  
+  // Child process routing
+  setChildContext(context: Context | string): void;
+  setChildRouter(router: (cmd: string) => Context): void;
+  
+  // Lifecycle
+  destroy(): Promise<void>;
 }
+
+interface ContextOptions {
+  name: string;
+  env?: Record<string, string>;
+  cwd?: string;
+  persistent?: boolean;  // Maintain pwd, env changes
+  isolation?: 'none' | 'secure';  // Namespace isolation level
+  childContext?: string;  // Route ALL child processes to this context
+  // Note: We removed routeChild callback - universal routing is simpler
 ```
 
 ### How It Works
 
 ```typescript
-// Regular command - runs in shared user namespace
-await sandbox.exec("npm install");
-await sandbox.exec("node app.js");
-await sandbox.exec("ps aux");  // Can see other user processes
-
-// Command with credentials - automatically uses secure namespace
-await sandbox.exec("aws s3 deploy", {
-  env: { 
-    AWS_ACCESS_KEY_ID: secret,
-    AWS_SECRET_ACCESS_KEY: secretKey
-  }
+// Create contexts with different credentials
+const platform = await sandbox.createContext({
+  name: "platform",
+  env: { ANTHROPIC_API_KEY: platformKey },
+  persistent: true,
+  childContext: "user"  // ALL children route to user context (universal routing)
 });
-// ↑ This automatically runs in isolated secure namespace!
 
-// Back to regular commands - no credentials visible
-await sandbox.exec("echo $AWS_ACCESS_KEY_ID");  // Empty
+const user = await sandbox.createContext({
+  name: "user",
+  env: { 
+    CLOUDFLARE_API_TOKEN: userToken,
+    AWS_ACCESS_KEY_ID: userAwsKey
+  },
+  persistent: true
+});
+
+// Execute in specific contexts
+await platform.exec("claude code --prompt 'create worker'");
+// Claude gets: ANTHROPIC_API_KEY
+// When Claude runs `wrangler deploy`, it executes in user context
+
+await user.exec("wrangler deploy");
+// Gets: CLOUDFLARE_API_TOKEN
+
+// Contexts maintain state
+await user.exec("cd /my-project");
+await user.exec("npm install");  // Runs in /my-project
+await user.exec("pwd");  // Output: /my-project
 ```
 
 ### Why This Design Wins
 
-1. **Zero Learning Curve** - Just use exec() like always
-2. **Automatic Security** - Credentials trigger isolation automatically
-3. **No Migration Pain** - Existing code just works
-4. **Clear Mental Model** - "Credentials = Isolated" 
-5. **Optimal Performance** - Only isolated when needed
+1. **Explicit Over Magic** - Developer chooses context explicitly, no command pattern matching
+2. **Unified Abstraction** - Sessions and namespaces are both just "contexts"
+3. **Solves Multi-Tenancy** - Platform and user credentials clearly separated
+4. **Handles Nesting** - Parent contexts can route children to different contexts
+5. **Stateful Sessions** - Each context maintains pwd, env changes, etc.
+6. **Clear Mental Model** - "Context = Environment + State + Credentials"
 
-## Behind the Scenes: Three Reusable Namespaces
+## Behind the Scenes: Context Implementation
 
 ```
-Container (at startup, creates 3 persistent namespaces)
-├── Control Namespace (Hidden from user)
+Container (at startup)
+├── Control Context (Hidden, for Bun/Jupyter)
 │   ├── Bun Server (port 8080)
 │   └── Jupyter Kernel (port 8888)
 │
-├── User Namespace (Default for exec)
-│   ├── All regular commands run here
-│   ├── Processes can see each other
-│   └── NO credentials ever
-│
-└── Secure Namespace (When env provided)
-    ├── Isolated from user namespace
-    ├── Credentials exist only during command
-    └── Cleared after each use
+└── User-Created Contexts (On-demand)
+    ├── Platform Context
+    │   ├── Platform credentials (Anthropic API key)
+    │   ├── Session state (pwd, env vars)
+    │   ├── LD_PRELOAD interceptor enabled
+    │   └── Universal routing → ALL children to User Context
+    │
+    └── User Context
+        ├── User credentials (Cloudflare, AWS)
+        ├── Session state (pwd, env vars)
+        └── Receives ALL commands from Platform's children
 ```
+
+### Context Isolation & Routing Mechanism
+
+Each context runs in its own Linux namespace (when available):
+- **PID namespace**: Process isolation
+- **Mount namespace**: Separate /proc view
+- **Session state**: Maintained via persistent shell process
+
+#### Universal Routing via LD_PRELOAD
+
+We use LD_PRELOAD to intercept ALL subprocess calls from AI agents:
+
+```c
+// When Claude runs ANY command, our interceptor routes it
+int execve(const char *pathname, char *const argv[], char *const envp[]) {
+    const char* target = getenv("SANDBOX_ROUTE_TO_CONTEXT");
+    if (target) {
+        // Route to specified context (e.g., 'user')
+        return route_to_context(pathname, argv, envp, target);
+    }
+    return real_execve(pathname, argv, envp);
+}
+```
+
+This means:
+- No pattern matching needed
+- No command detection required
+- ALL child processes automatically route
+- Complete transparency to AI agents
 
 ### The Magic: Automatic Namespace Selection
 
@@ -209,56 +298,123 @@ function createNamespace(name: string, opts: NamespaceOptions) {
 }
 ```
 
-## What SDK Users Get
+## Real-World Usage Patterns
 
-### Automatic Protection (Zero Code Changes)
-
-1. **Control Plane Protection**: Jupyter/Bun can't be killed by user code
-2. **Port Protection**: Ports 8080/8888 pre-reserved at startup
-3. **Process Isolation**: Control plane hidden from `ps aux`
-
-### Credential Isolation (Automatic with env option)
+### AI Code Generation Platform
 
 ```typescript
-// Just pass env to get isolation - that's it!
-await sandbox.exec("aws s3 deploy", {
-  env: { AWS_KEY: secret }  // Automatically isolated
-});
+export async function runAICodeGenerator(env: Env, userId: string, prompt: string) {
+  const sandbox = getSandbox(env.Sandbox, userId);
+  
+  // Create contexts if not exists
+  if (!sandbox.hasContext("platform")) {
+    // Platform context for AI tools
+    await sandbox.createContext({
+      name: "platform",
+      env: { ANTHROPIC_API_KEY: env.ANTHROPIC_KEY },
+      childContext: "user"  // Route children to user context
+    });
+    
+    // User context for deployments
+    await sandbox.createContext({
+      name: "user",
+      env: { 
+        CLOUDFLARE_API_TOKEN: await getUserToken(userId),
+        AWS_ACCESS_KEY_ID: await getUserAwsKey(userId)
+      }
+    });
+  }
+  
+  const platform = sandbox.context("platform");
+  const user = sandbox.context("user");
+  
+  // AI runs in platform context
+  await platform.exec(`claude code --prompt "${prompt}"`);
+  // Claude's child processes (wrangler, aws cli) run in user context
+  
+  // Check results in user context
+  const files = await user.exec("ls -la");
+  return files;
+}
 ```
 
-- Credentials never in global environment
-- Scoped to single command only  
-- No cross-contamination between commands
-- Automatic cleanup after execution
+### Build Pipeline with Isolation
+
+```typescript
+// Separate contexts for different build stages
+const build = await sandbox.createContext({
+  name: "build",
+  env: { NODE_ENV: "production" },
+  isolation: "secure"
+});
+
+const test = await sandbox.createContext({
+  name: "test",
+  env: { NODE_ENV: "test", TEST_API_KEY: testKey },
+  isolation: "secure"
+});
+
+await build.exec("npm install");
+await build.exec("npm run build");
+
+await test.exec("npm test");
+await test.exec("npm run integration-tests");
+```
 
 ## Migration Guide
 
-### Old Pattern (Insecure)
+### From Global Environment Variables
+
 ```typescript
-// DON'T: Global environment variables
+// Old: Global environment (insecure)
 await sandbox.setEnvVars({ 
   AWS_ACCESS_KEY_ID: secret,
-  AWS_SECRET_ACCESS_KEY: secretKey
+  ANTHROPIC_API_KEY: apiKey
 });
-await sandbox.exec('aws s3 ls');  // Has access
-await sandbox.exec('node app.js'); // ALSO has access (bad!)
+await sandbox.exec('aws s3 ls');
+await sandbox.exec('claude code');
+
+// New: Context-based (secure)
+const aws = await sandbox.createContext({
+  name: "aws",
+  env: { AWS_ACCESS_KEY_ID: secret }
+});
+
+const ai = await sandbox.createContext({
+  name: "ai",
+  env: { ANTHROPIC_API_KEY: apiKey }
+});
+
+await aws.exec('aws s3 ls');
+await ai.exec('claude code');
 ```
 
-### New Pattern (Secure)
+### From Session IDs
+
 ```typescript
-// DO: Scoped environment variables
-await sandbox.exec('aws s3 ls', {
-  env: { 
-    AWS_ACCESS_KEY_ID: secret,
-    AWS_SECRET_ACCESS_KEY: secretKey
-  }
-});  // Only this command has access
+// Old: Session IDs (limited)
+const sessionId = "user-123";
+await sandbox.exec("cd /project", { sessionId });
+await sandbox.exec("npm install", { sessionId });
 
-await sandbox.exec('node app.js'); // No access (good!)
+// New: Contexts (full state management)
+const project = await sandbox.createContext({ 
+  name: "project",
+  persistent: true 
+});
+await project.exec("cd /project");
+await project.exec("npm install");  // Runs in /project
 ```
 
-### That's It!
-Literally just move your secrets from `setEnvVars()` to the `env` option of `exec()`. The SDK handles the isolation automatically.
+### Backward Compatibility
+
+The old `sandbox.exec()` method still works - it uses a default context:
+
+```typescript
+// These are equivalent:
+await sandbox.exec("ls");
+await sandbox.context("default").exec("ls");
+```
 
 ## FAQ
 

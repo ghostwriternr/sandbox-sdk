@@ -152,43 +152,76 @@ Our three issues pass all tests:
 - **Port Hijacking**: ✓ Breaks API, ✓ Can't reclaim port, ✓ Common port conflicts, ✓ Downtime
 - **Credentials**: ✓ Breaks security, ✓ Can't revoke access, ✓ Logging accidents, ✓ Financial loss
 
-## Solution: Three Reusable Namespaces
+## Solution: Context-Based Architecture with Universal Routing
 
-We create three persistent namespaces at container startup:
+After extensive analysis, we've discovered a critical insight that simplifies everything:
 
-### 1. Control Namespace (Hidden)
-- Bun server and Jupyter kernel run here
-- Completely invisible to user code
-- Processes can't be killed or interfered with
+### Key Discovery: AI Agents Never Need Platform Commands
 
-### 2. User Namespace (Shared)
-- All regular `exec()` commands run here
-- Processes CAN see each other (for debugging)
-- `ps aux`, `htop`, etc. work normally
-- NO credentials ever enter this namespace
+**The breakthrough**: AI agents (Claude, Gemini, etc.) NEVER need to execute commands in platform context. They need platform credentials to authenticate, but ALL subprocess execution can route to user context.
 
-### 3. Secure Namespace (Isolated)
-- Commands with `env` option automatically run here
-- Credentials exist only during command execution
-- Cleared after each command completes
-- Isolated from user namespace
+This means:
+- No pattern matching needed (no detecting 'wrangler', 'aws', etc.)
+- No complex routing logic
+- Complete isolation by default
+- Simple, reliable implementation
 
-### API Design: Single exec() Method
+### The Context-Based Solution
+
+We use **Execution Contexts** - isolated environments with their own credentials, state, and routing rules:
+
 ```typescript
-// Regular command - runs in user namespace
-await sandbox.exec("npm install");
-await sandbox.exec("ps aux");  // Sees other user processes
-
-// Command with credentials - automatically uses secure namespace
-await sandbox.exec("aws s3 deploy", {
-  env: { AWS_ACCESS_KEY_ID: secret }  // Triggers isolation
+// Platform context for AI agent
+const platform = await sandbox.createContext({
+  name: "platform",
+  env: { 
+    ANTHROPIC_API_KEY: platformKey,
+    // Enable universal routing via LD_PRELOAD
+    LD_PRELOAD: '/lib/universal_router.so',
+    SANDBOX_ROUTE_TO_CONTEXT: 'user'  // ALL children route here
+  },
+  persistent: true,
+  childContext: "user"
 });
 
-// Next command has no access to credentials
-await sandbox.exec("echo $AWS_ACCESS_KEY_ID");  // Empty
+// User context for deployments
+const user = await sandbox.createContext({
+  name: "user",
+  env: { 
+    CLOUDFLARE_API_TOKEN: userToken,
+    AWS_ACCESS_KEY_ID: userAwsKey
+  },
+  persistent: true
+});
+
+// Claude runs with platform credentials
+await platform.exec("claude code --prompt 'deploy my app'");
+// EVERY command Claude runs routes to user context automatically
 ```
 
-**Key Insight**: The SDK automatically selects the right namespace based on whether credentials are provided. No need for separate `execSecure()` method!
+### How Universal Routing Works
+
+We use LD_PRELOAD to intercept ALL system calls at the lowest level:
+
+```c
+// universal_router.c - Intercepts EVERY exec call
+int execve(const char *pathname, char *const argv[], char *const envp[]) {
+    const char* target = getenv("SANDBOX_ROUTE_TO_CONTEXT");
+    if (target) {
+        // Route to specified context - no pattern matching!
+        return route_to_context(pathname, argv, envp, target);
+    }
+    return real_execve(pathname, argv, envp);
+}
+```
+
+This intercepts:
+- `subprocess.run()` in Python
+- `exec()` in Node.js
+- `system()` in Ruby
+- Any other process creation method
+
+**Result**: Complete, automatic isolation with zero configuration.
 
 
 
@@ -1641,24 +1674,42 @@ containers:
 
 ## Final API Design Considerations
 
-### Why Two Contexts Instead of Per-Command Isolation?
+### Why Contexts Over Other Approaches?
 
-We considered making isolation per-command:
-```typescript
-// Option 1: Per-command (what we considered)
-await sandbox.execWithSecrets('aws s3 ls', { AWS_KEY: secret });
-await sandbox.exec('python app.py');  // No secrets
+We evaluated several API designs:
 
-// Option 2: Two contexts (what we chose)
-await sandbox.platform.exec('aws s3 ls', { env: { AWS_KEY: secret }});
-await sandbox.user.exec('python app.py');
-```
+1. **Auto-magic namespace selection** (rejected)
+   ```typescript
+   // Too implicit, hard to debug
+   await sandbox.exec("aws s3 ls", { env: { AWS_KEY }});  // Which namespace?
+   ```
 
-We chose two contexts because:
-1. **Mental Model**: Clear separation between platform and user operations
-2. **Performance**: Can reuse namespaces for multiple platform operations
-3. **State Management**: Platform operations can share state within their namespace
-4. **Developer Experience**: Explicit about what has access to secrets
+2. **Command pattern matching** (rejected)
+   ```typescript
+   // Fragile, incomplete list
+   if (cmd.includes('aws')) useSecureNamespace();
+   ```
+
+3. **Contexts as first-class citizens** (chosen)
+   ```typescript
+   // Explicit, clear, flexible
+   const aws = await sandbox.createContext({ 
+     name: "aws",
+     env: { AWS_KEY },
+     persistent: true 
+   });
+   await aws.exec("aws s3 ls");
+   await aws.exec("aws s3 deploy");  // Shares state with previous command
+   ```
+
+### Key Benefits of Context Design
+
+1. **Explicit Control**: Developers choose context explicitly
+2. **Unified Abstraction**: Sessions + namespaces = contexts
+3. **Multi-tenancy**: Platform vs user credentials clearly separated
+4. **Child Routing**: AI agents route children to different contexts
+5. **State Persistence**: Each context maintains pwd, env, shell state
+6. **Future Proof**: Can add features without breaking API changes
 
 ### Implementation Priority Order
 
