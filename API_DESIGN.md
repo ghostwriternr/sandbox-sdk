@@ -1,443 +1,291 @@
-# Secure Platform Operations API Design - Final
+# API Design for Critical Security Issues
 
-## Understanding Your Preferences
+## Focus: The Three Critical Problems
 
-Based on your feedback, here's my understanding:
+We're focusing ONLY on issues that break the sandbox:
 
-1. **No Gradual Migration**: Make namespace isolation the default in a new major version (v2.0). Clean break, no maintaining multiple code paths.
+1. **Process Killing** - User code can kill Jupyter/Bun → Sandbox dies
+2. **Port Hijacking** - User code can steal ports 8080/8888 → Control plane fails  
+3. **Credential Exposure** - Secrets visible in environment → Financial/security risk
 
-2. **Naming Concerns**: "platform" and "user" don't reflect reality. The SDK's actual users are developers building platforms. Their end users may never directly touch our SDK. The execution happening in the sandbox could be:
-   - Templates being cloned
-   - AI agents (like Claude or Gemini) modifying code
-   - Build tools running
-   - Servers starting
-   - All arbitrary code that the developer orchestrates
+Everything else (resource limits, metadata endpoints, etc.) is nice-to-have but not urgent.
 
-3. **Real Use Cases**: Include AI agent examples (like Claude Code) alongside AWS examples, as they represent dominant patterns:
-   - AWS/cloud operations need credentials isolated from other code
-   - AI agents run inside containers, modify files directly, don't use our SDK
+## Key Design Question: User Control vs Transparent Protection
 
-4. **API Design Preference**: Direct method names (no nesting) for cleaner migration path
-
-## Executive Summary
-
-With production CAP_SYS_ADMIN capabilities, we can implement namespace-based isolation TODAY. This design uses direct method names (`execWithSecrets` vs `exec`) to clearly distinguish between isolated and standard execution contexts.
-
-## The Core Problem - CORRECTED UNDERSTANDING
-
-**Critical clarification**: The AI agent (like Claude Code or Gemini) SHOULD have access to secrets - it needs them to perform deployments, database migrations, etc. on behalf of the platform developer. 
-
-What we need to protect against:
-1. **Code written by the AI agent** - If the AI writes a file `app.js` that contains `console.log(process.env)`, that code shouldn't see secrets when executed
-2. **Processes started for end users** - When the AI or platform starts a dev server for the end user, that server shouldn't have access to deployment secrets
-3. **User-provided code** - Any code the end user supplies shouldn't access platform secrets
-
-The security boundary is NOT "AI agent vs everything else" - it's "platform operations (including AI agent commands) vs code/processes that run on behalf of end users".
-
-Example scenario:
-- AI agent runs `aws s3 cp ...` - SHOULD have AWS credentials ✅
-- AI agent writes code that includes `console.log(process.env)` - that code when executed should NOT see AWS credentials ❌
-- AI agent starts `npm run dev` for user's app - that server should NOT have AWS credentials ❌
-
-## The Final API Design
-
-### Primary Interface
+### Option 1: Completely Transparent (No API Changes)
+**Everything happens behind the scenes**
 
 ```typescript
-import { getSandbox } from '@cloudflare/sandbox';
-
-// Version 2.0 - Secure by default
-const sandbox = getSandbox(env.Sandbox, userId);
-
-// Execute with secrets in isolated namespace
-await sandbox.execWithSecrets('aws s3 ls', {
-  env: {
-    AWS_ACCESS_KEY_ID: env.AWS_KEY,
-    AWS_SECRET_ACCESS_KEY: env.AWS_SECRET
-  }
-});
-
-// Execute normally (no access to secrets)
-await sandbox.exec('claude-code --edit main.py');
+// User code stays exactly the same
+const sandbox = getSandbox(env.Sandbox, "my-sandbox");
+await sandbox.exec("npm install");  // Automatically protected
+await sandbox.setEnvVars({ AWS_KEY: secret });  // Automatically isolated
 ```
 
-### Complete API Surface
+**Pros:**
+- Zero migration effort
+- No learning curve
+- Works with existing code
+
+**Cons:**
+- No way to opt into stricter security
+- Can't distinguish platform vs user operations
+- Credentials still globally visible (just to fewer processes)
+
+### Option 2: Explicit Security Contexts (Recommended)
+**Users choose when they need isolation**
+
+```typescript
+// New API for platform operations with secrets
+await sandbox.execSecure("aws s3 deploy", {
+  env: { AWS_ACCESS_KEY_ID: secret },
+  isolated: true  // Runs in separate namespace
+});
+
+// Regular operations unchanged
+await sandbox.exec("node app.js");  // No secrets, no isolation needed
+```
+
+**Pros:**
+- Clear security boundaries
+- Explicit about what has access to secrets
+- Platform operations clearly separated
+- Minimal API changes
+
+**Cons:**
+- Requires migration for secure operations
+- Users must understand when to use which method
+
+### Option 3: Dual Context API (Most Explicit)
+**Two separate execution contexts**
+
+```typescript
+const sandbox = getSandbox(env.Sandbox, "my-sandbox");
+
+// Platform context for privileged operations
+await sandbox.platform.exec("aws deploy", {
+  env: { AWS_KEY: secret }
+});
+
+// User context for generated code
+await sandbox.user.exec("node app.js");
+```
+
+**Pros:**
+- Clearest mental model
+- Impossible to accidentally expose secrets
+- State separation between contexts
+
+**Cons:**
+- Bigger API change
+- More complex for simple use cases
+
+## Recommended API Design: Explicit Security Contexts
+
+Based on our analysis, we recommend **Option 2** - adding a secure execution method while keeping the existing API for backward compatibility.
+
+### Core API Additions
 
 ```typescript
 interface Sandbox {
-  // ============ ISOLATED NAMESPACE (with secrets) ============
+  // Existing methods remain unchanged
+  exec(command: string, options?: ExecOptions): Promise<ExecResult>;
+  setEnvVars(vars: Record<string, string>): Promise<void>;
   
-  // Execute command in isolated namespace with secrets
-  execWithSecrets(command: string, options?: {
-    env?: Record<string, string>;      // Secrets to inject
-    cwd?: string;                       // Working directory
-    timeout?: number;                   // Max execution time
-  }): Promise<ExecResult>;
+  // NEW: Secure execution with isolated credentials
+  execSecure(
+    command: string,
+    options?: SecureExecOptions
+  ): Promise<ExecResult>;
   
-  // Start long-running process in isolated namespace
-  startProcessWithSecrets(command: string, options?: {
-    env?: Record<string, string>;
-    cwd?: string;
-  }): Promise<Process>;
+  // NEW: Check if secure execution is available
+  hasSecureExecution(): Promise<boolean>;
+}
+
+interface SecureExecOptions extends ExecOptions {
+  // Environment variables only visible to this command
+  env?: Record<string, string>;
   
-  // ============ STANDARD NAMESPACE (no secrets) ============
+  // Run in isolated namespace (default: true)
+  isolated?: boolean;
   
-  // Execute command normally (existing API)
-  exec(command: string, options?: {
-    env?: Record<string, string>;      // Regular env vars (no secrets)
-    cwd?: string;
-    timeout?: number;
-  }): Promise<ExecResult>;
-  
-  // Start process normally (existing API)
-  startProcess(command: string, options?: {
-    env?: Record<string, string>;
-    cwd?: string;
-  }): Promise<Process>;
-  
-  // ============ SHARED OPERATIONS (both namespaces) ============
-  
-  // File operations (unchanged from v1)
-  writeFile(path: string, content: string | Buffer): Promise<void>;
-  readFile(path: string): Promise<{ content: string }>;
-  deleteFile(path: string): Promise<void>;
-  
-  // Directory operations (unchanged)
-  mkdir(path: string): Promise<void>;
-  ls(path: string): Promise<string[]>;
-  exists(path: string): Promise<boolean>;
-  
-  // Process management (unchanged)
-  killProcess(processId: string): Promise<void>;
-  waitForProcess(processId: string): Promise<ExecResult>;
-  listProcesses(): Promise<Process[]>;
-  
-  // Port forwarding (unchanged)
-  exposePort(port: number): Promise<{ url: string }>;
-  
-  // ============ DEPRECATED (removed in v2) ============
-  
-  // setEnvVars() - REMOVED - use execWithSecrets() instead
+  // Timeout for the operation
+  timeout?: number;
 }
 ```
 
-## Migration Guide
+### Usage Examples
 
-### Before (v1.x - Insecure)
+#### Deploying with AI Agent
 ```typescript
-const sandbox = getSandbox(env.Sandbox, userId);
-
-// INSECURE - Secrets exposed to all code
-await sandbox.setEnvVars({
-  AWS_ACCESS_KEY_ID: env.AWS_KEY,
-  AWS_SECRET_ACCESS_KEY: env.AWS_SECRET
-});
-
-await sandbox.exec('aws s3 ls');
-await sandbox.exec('python app.py');  // Can access AWS credentials!
-```
-
-### After (v2.0 - Secure)
-```typescript
-const sandbox = getSandbox(env.Sandbox, userId);
-
-// SECURE - Secrets only available to specific command
-await sandbox.execWithSecrets('aws s3 ls', {
+// AI agent needs AWS credentials to deploy
+await sandbox.execSecure('aws lambda deploy function.zip', {
   env: {
     AWS_ACCESS_KEY_ID: env.AWS_KEY,
     AWS_SECRET_ACCESS_KEY: env.AWS_SECRET
   }
 });
 
-await sandbox.exec('python app.py');  // Cannot access AWS credentials
+// Code the AI wrote runs WITHOUT credentials
+await sandbox.exec('node app.js');  // No access to AWS keys
 ```
 
-### Migration Steps
-
-1. **Remove all `setEnvVars()` calls**
-2. **For commands needing secrets**: Change `exec()` to `execWithSecrets()`
-3. **For commands not needing secrets**: Keep using `exec()`
-4. **Test isolation**: Verify secrets aren't accessible in regular `exec()` calls
-
-## Real-World Examples
-
-### Example 1: AI Agent Code Generation Platform (CORRECTED)
-
+#### Database Migration
 ```typescript
-// Developer building an AI code generation platform
-export default {
-  async fetch(request: Request, env: Env) {
-    const { userPrompt } = await request.json();
-    const sandbox = getSandbox(env.Sandbox, userId);
-    
-    // Start Claude Code with platform secrets - it needs them to deploy!
-    // Claude can run AWS CLI, terraform, database commands, etc.
-    const claudeProcess = await sandbox.startProcessWithSecrets(
-      `claude-code --task "${userPrompt}" --directory /app`,
-      {
-        env: {
-          ANTHROPIC_API_KEY: env.ANTHROPIC_KEY,
-          AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY,      // Claude needs these!
-          AWS_SECRET_ACCESS_KEY: env.AWS_SECRET,
-          DATABASE_URL: env.DATABASE_URL,
-          GITHUB_TOKEN: env.GITHUB_TOKEN
-        }
-      }
-    );
-    
-    // Claude can now:
-    // - Run `aws s3 cp` to fetch templates ✅
-    // - Run `aws lambda deploy` to deploy functions ✅
-    // - Run `psql` to set up databases ✅
-    // - Run `git push` to save code ✅
-    
-    // Wait for Claude to finish
-    await sandbox.waitForProcess(claudeProcess.id);
-    
-    // But when Claude writes code like this in app.js:
-    // console.log(process.env.AWS_ACCESS_KEY_ID)
-    
-    // And then we run that code:
-    await sandbox.exec('node /app/app.js');  
-    // This will NOT see AWS_ACCESS_KEY_ID! ✅
-    
-    // Similarly, when starting the user's dev server:
-    await sandbox.exec('cd /app && npm run dev');
-    // The dev server will NOT have access to AWS credentials ✅
-    
-    // Key insight: Claude agent HAS secrets, but code it writes doesn't
+// Run migration with database credentials
+await sandbox.execSecure('psql -f migrate.sql', {
+  env: {
+    PGPASSWORD: env.DB_PASSWORD,
+    PGHOST: 'prod-db.example.com'
   }
+});
+
+// Start app without database credentials
+await sandbox.exec('npm start');  // Can't directly access DB
+```
+
+#### Package Installation
+```typescript
+// Install packages in isolated environment
+// Prevents postinstall scripts from accessing secrets
+await sandbox.execSecure('npm install untrusted-package', {
+  isolated: true,
+  env: {}  // No secrets during installation
+});
+```
+
+### Backward Compatibility
+
+```typescript
+// Old code continues to work (with security warning)
+await sandbox.setEnvVars({ AWS_KEY: secret });
+await sandbox.exec('aws s3 ls');  // Works but logs warning
+
+// Migration path
+if (await sandbox.hasSecureExecution()) {
+  // Use new secure API
+  await sandbox.execSecure('aws s3 ls', { env: { AWS_KEY: secret }});
+} else {
+  // Fall back to old method
+  console.warn('Secure execution not available');
+  await sandbox.setEnvVars({ AWS_KEY: secret });
+  await sandbox.exec('aws s3 ls');
 }
 ```
 
-### Example 2: Database Migration Platform
+### Why This Design?
 
+1. **Minimal API Surface**: Just two new methods
+2. **Clear Security Boundary**: `execSecure` = with secrets, `exec` = without
+3. **Backward Compatible**: Existing code continues to work
+4. **Progressive Enhancement**: Can detect and use when available
+5. **Simple Mental Model**: "Use execSecure for operations with credentials"
+
+## Implementation Behind the Scenes
+
+### For Process Killing Prevention
 ```typescript
-// Developer building a database migration platform
-async function runMigration(sandbox: Sandbox, env: Env) {
-  // Generate migration files using AI
-  await sandbox.exec('gemini-cli generate migration --from schema.old --to schema.new');
-  
-  // Review generated migration
-  const migration = await sandbox.readFile('/migrations/001_update.sql');
-  
-  // Run migration with database credentials
-  await sandbox.execWithSecrets(
-    'psql -f /migrations/001_update.sql',
-    {
-      env: {
-        PGHOST: env.DB_HOST,
-        PGUSER: env.DB_USER,
-        PGPASSWORD: env.DB_PASSWORD,
-        PGDATABASE: env.DB_NAME
-      },
-      timeout: 60000
-    }
-  );
-  
-  // Verify migration (read-only check)
-  await sandbox.execWithSecrets(
-    'psql -c "SELECT version FROM schema_migrations"',
-    {
-      env: {
-        PGHOST: env.DB_HOST,
-        PGUSER: env.DB_READONLY_USER,
-        PGPASSWORD: env.DB_READONLY_PASSWORD
-      }
-    }
-  );
-}
-```
-
-### Example 3: Multi-Stage CI/CD Pipeline
-
-```typescript
-// Complex pipeline with mixed security requirements
-async function runPipeline(sandbox: Sandbox, env: Env) {
-  // Stage 1: Code quality (no secrets)
-  await sandbox.exec('npm run lint');
-  await sandbox.exec('npm run test');
-  
-  // Stage 2: Security scanning (needs security API key)
-  await sandbox.execWithSecrets('snyk test', {
-    env: { SNYK_TOKEN: env.SNYK_TOKEN }
-  });
-  
-  // Stage 3: Build (no secrets)
-  await sandbox.exec('docker build -t app:latest .');
-  
-  // Stage 4: Push to registry (needs registry credentials)
-  await sandbox.execWithSecrets(
-    'docker push registry.company.com/app:latest',
-    {
-      env: {
-        DOCKER_REGISTRY_USER: env.REGISTRY_USER,
-        DOCKER_REGISTRY_PASS: env.REGISTRY_PASS
-      }
-    }
-  );
-  
-  // Stage 5: Deploy (needs kubernetes credentials)
-  await sandbox.execWithSecrets('kubectl apply -f k8s/', {
-    env: { KUBECONFIG_CONTENT: env.KUBECONFIG }
-  });
-  
-  // Stage 6: Notify (needs Slack token)
-  await sandbox.execWithSecrets(
-    'curl -X POST https://slack.com/api/chat.postMessage ...',
-    {
-      env: { SLACK_TOKEN: env.SLACK_TOKEN }
-    }
-  );
-}
-```
-
-### Example 4: Terraform Infrastructure Management
-
-```typescript
-async function manageTerraform(sandbox: Sandbox, env: Env) {
-  // Initialize Terraform (needs backend credentials)
-  await sandbox.execWithSecrets('terraform init', {
-    env: { TF_TOKEN_app_terraform_io: env.TERRAFORM_CLOUD_TOKEN },
-    cwd: '/infra'
-  });
-  
-  // Plan changes (needs cloud provider credentials)
-  await sandbox.execWithSecrets('terraform plan -out=tfplan', {
-    env: {
-      AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY,
-      AWS_SECRET_ACCESS_KEY: env.AWS_SECRET,
-      TF_VAR_db_password: env.DB_PASSWORD  // Terraform variable
-    },
-    cwd: '/infra'
-  });
-  
-  // Show plan to user (safe - no secrets in plan file)
-  const planOutput = await sandbox.exec('terraform show tfplan', { cwd: '/infra' });
-  
-  // Apply if approved (needs credentials again)
-  if (approved) {
-    await sandbox.execWithSecrets('terraform apply tfplan', {
-      env: {
-        AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY,
-        AWS_SECRET_ACCESS_KEY: env.AWS_SECRET
-      },
-      cwd: '/infra'
+// Bun server automatically runs control plane in hidden namespace
+class ContainerServer {
+  async start() {
+    // Control plane components start in isolated PID namespace
+    await this.startInNamespace({
+      jupyter: 'jupyter kernel',
+      bun: 'bun serve --port 8080'
     });
+    // User code can't see or kill these processes
   }
 }
 ```
 
-## Implementation Details
-
-### How It Works Under the Hood
-
+### For Port Protection  
 ```typescript
-// In the bun server (container_src/index.ts)
-class SecureExecutor {
-  async execWithSecrets(command: string, env: Record<string, string>) {
-    // Create isolated namespace using unshare
-    const child = spawn('unshare', [
-      '--pid',      // Separate process IDs
-      '--mount',    // Separate filesystem mounts
-      '--fork',     // Fork before exec
-      'sh', '-c', command
-    ], {
-      env: {
-        PATH: '/usr/local/bin:/usr/bin:/bin',  // Minimal env
-        HOME: '/tmp',
-        ...env  // Secrets only in this namespace
-      },
-      detached: true
-    });
-    
-    // This process is INVISIBLE to regular exec() calls
-    return collectOutput(child);
+// Pre-bind critical ports before user code runs
+class ContainerServer {
+  async initialize() {
+    // Bind ports immediately on container start
+    this.bunServer = Bun.serve({ port: 8080 });
+    this.jupyterServer = new JupyterKernel({ port: 8888 });
+    // User code gets EADDRINUSE if they try to bind
+  }
+}
+```
+
+### For Credential Isolation
+```typescript
+// execSecure implementation
+async execSecure(command: string, options?: SecureExecOptions) {
+  if (!this.hasCapSysAdmin()) {
+    // Fallback for local dev
+    return this.execWithWarning(command, options);
   }
   
-  async exec(command: string, env: Record<string, string>) {
-    // Run in main namespace (no access to secrets)
-    return spawn(command, {
-      env: {
-        ...process.env,  // Normal environment
-        ...env           // User-provided env (no secrets)
-      }
-    });
-  }
+  // Create isolated namespace for this execution
+  const result = await this.runInNamespace(command, {
+    env: options?.env || {},
+    mount: ['--mount'],  // Separate /proc
+    pid: ['--pid'],      // Separate process tree
+  });
+  
+  return result;
 }
 ```
 
-### Security Guarantees
+## Benefits for SDK Users
 
-| Attack Vector | v1.x (setEnvVars) | v2.0 (execWithSecrets) |
-|--------------|-------------------|------------------------|
-| `exec('echo $SECRET')` | ✅ Exposed | ❌ Not visible |
-| `exec('cat /proc/*/environ')` | ✅ Exposed | ❌ Different namespace |
-| `exec('ps aux')` seeing secret processes | ✅ Visible | ❌ Isolated PID namespace |
-| AI agent reading secrets | ✅ Can access | ❌ No access |
-| Build tools leaking secrets | ✅ Can leak | ❌ Never see them |
-| User code stealing credentials | ✅ Possible | ❌ Impossible |
+### What They Get Automatically (No Code Changes)
 
-## Advantages of This Design
+1. **Control Plane Protection**: Jupyter/Bun can't be killed
+2. **Port Protection**: Ports 8080/8888 are pre-reserved
+3. **Process Isolation**: Control plane hidden from `ps aux`
 
-1. **Minimal API Change**: Just add `WithSecrets` suffix to methods that need isolation
-2. **Clear Intent**: Method name explicitly shows when secrets are involved
-3. **Easy Migration**: Search for `setEnvVars`, replace with `execWithSecrets`
-4. **No Nesting**: Flat API structure, no `sandbox.platform.exec()` confusion
-5. **Backward Compatible**: All existing methods work (except deprecated `setEnvVars`)
-6. **Type Safety**: TypeScript ensures you provide env when using `execWithSecrets`
+### What They Get with Migration (Using execSecure)
 
-## Performance Characteristics
+1. **Credential Isolation**: Secrets never in global environment
+2. **Scoped Access**: Credentials only available to specific commands
+3. **Audit Trail**: Can log all secure executions
+4. **Time-Limited Exposure**: Credentials exist only during execution
 
-| Operation | Latency | Notes |
-|-----------|---------|-------|
-| `exec()` | ~1ms | No overhead, same as v1 |
-| `execWithSecrets()` | ~5ms | Namespace creation overhead |
-| `startProcess()` | ~2ms | No overhead |
-| `startProcessWithSecrets()` | ~6ms | Namespace creation |
-| File operations | ~1ms | Unchanged |
+## Migration Guide
 
-## Error Handling
-
+### Step 1: Identify Credential Usage
 ```typescript
-try {
-  await sandbox.execWithSecrets('aws s3 ls', {
-    env: { AWS_ACCESS_KEY_ID: env.AWS_KEY }
-  });
-} catch (error) {
-  if (error.code === 'NAMESPACE_NOT_SUPPORTED') {
-    // Local development without CAP_SYS_ADMIN
-    console.warn('Running in degraded security mode (local dev)');
-    // Could fall back to regular exec with warning
-  }
-}
+// Look for patterns like:
+await sandbox.setEnvVars({ AWS_KEY: secret });
+await sandbox.exec('aws s3 ls');
+```
+
+### Step 2: Replace with Secure Execution
+```typescript
+// Change to:
+await sandbox.execSecure('aws s3 ls', {
+  env: { AWS_KEY: secret }
+});
+```
+
+### Step 3: Remove Global Environment Variables
+```typescript
+// Remove calls to setEnvVars() for secrets
+// Keep it only for non-sensitive config:
+await sandbox.setEnvVars({ 
+  NODE_ENV: 'development',  // OK - not secret
+  PORT: '3000'              // OK - not secret
+});
 ```
 
 ## FAQ
 
-### Q: Why not just use a `secure: true` option?
-A: Explicit method names make security boundaries clear in code reviews. You can immediately see which commands have access to secrets.
+**Q: Do I have to change my code?**
+A: No, but you should for security. Control plane protection happens automatically.
 
-### Q: What about existing code using setEnvVars()?
-A: It's removed in v2.0. This is a breaking change requiring migration, but it eliminates the security vulnerability completely.
+**Q: What about existing setEnvVars() calls?**
+A: They continue to work but with security warnings for sensitive-looking keys.
 
-### Q: Can I pass secrets to regular exec()?
-A: No. Regular `exec()` runs in the main namespace which never has access to secrets passed via `execWithSecrets()`.
+**Q: How do I know if secure execution is available?**
+A: Use `hasSecureExecution()` to check (returns true in production, false in local dev).
 
-### Q: How do secrets get shared between multiple execWithSecrets() calls?
-A: They don't. Each `execWithSecrets()` creates a fresh isolated namespace. If you need persistent secrets, use `startProcessWithSecrets()` for a long-running process.
+**Q: Can I still use environment variables for non-secrets?**
+A: Yes! Use `setEnvVars()` for configuration, `execSecure()` for secrets.
 
-### Q: What happens in local development?
-A: The SDK detects missing CAP_SYS_ADMIN and falls back to process-level isolation with warnings. Security is degraded but functionality remains.
-
-## Summary
-
-This design achieves:
-- **Complete security** via namespace isolation
-- **Minimal API changes** for easy migration  
-- **Clear semantics** with explicit method names
-- **Full compatibility** with all CLI tools (AWS CLI, terraform, kubectl)
-- **Zero overhead** for normal operations
-- **5ms overhead** for secure operations
-
-The key insight: By using direct method names (`execWithSecrets` vs `exec`), we make security boundaries explicit without complex nesting or confusing terminology.
+**Q: What's the performance impact?**
+A: Minimal - namespace creation adds <5ms per execution.
