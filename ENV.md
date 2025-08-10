@@ -507,22 +507,37 @@ char* getenv(const char* name) {
 
 
 
-## Migration Path
+## Implementation Approach
 
-### Phase 1: Proof of Concept
-- Build namespace isolation using production CAP_SYS_ADMIN
-- Test with real credentials in isolated namespaces
-- Document the new security model
+### Why Not Use Existing Tools?
 
-### Phase 2: SDK Enhancement
-- Design new API that provides proper isolation
-- Implement namespace management in container
-- Update examples and documentation
+We researched existing sandboxing solutions (Bubblewrap, gVisor, Firejail, etc.) and found:
+- **They solve general sandboxing** - We only need control plane protection
+- **They don't handle credential routing** - None route AI children to different contexts
+- **We're already sandboxed** - Firecracker+Docker provides strong isolation
+- **Our LD_PRELOAD approach is simpler** - One mechanism solves both problems
 
-### Phase 3: General Availability
-- Release updated SDK with isolation features
-- Provide migration guides for existing users
-- Deprecate insecure patterns over time
+### Our Simplified Implementation
+
+#### Phase 1: Control Plane Protection (Day 1)
+```bash
+# Hide control plane with one command at startup
+unshare --pid --fork --mount-proc sh -c '
+  bun serve --port 8080 &
+  jupyter kernel --port 8888 &
+  sleep infinity
+'
+```
+
+#### Phase 2: Universal Routing (Day 2-3)
+- Build LD_PRELOAD interceptor
+- Route ALL AI children to user context
+- No pattern matching needed
+
+#### Phase 3: Integration (Day 4-5)
+- Test with real AI agents
+- Verify credential isolation
+- Confirm control plane invisible
 
 ## Security Checklist
 

@@ -10,75 +10,74 @@ Everything else is deferred as nice-to-have.
 
 ## Implementation Architecture
 
+### Environment Context
+```
+Cloudflare Infrastructure
+└── Firecracker VM (hardware isolation)
+    └── Docker Container (namespace isolation)
+        └── Our Sandbox (need to isolate WITHIN container)
+```
+
+We're already inside strong isolation layers. We only need to protect our control plane from user code.
+
 ### Current State (Vulnerable)
 ```
-Container (Single namespace)
-├── All processes visible to each other
-├── Shared environment variables
-├── First-come-first-served ports
-└── No isolation boundaries
+Docker Container
+├── All processes visible (user can pkill jupyter/bun)
+├── Shared environment variables (credentials leaked)
+└── Ports can be hijacked (8080, 8888)
 ```
 
-### Target State (Context-Based Architecture)
+### Target State (Simplified)
 ```
-Container (At startup)
-├── Control Context (Hidden, for infrastructure)
-│   ├── Bun Server (port 8080 pre-bound)
-│   ├── Jupyter Kernel (port 8888 pre-bound)
-│   └── Invisible to user code
+Docker Container
+├── Control Plane (Hidden via simple unshare --pid)
+│   ├── Bun Server (port 8080) - invisible to ps/pkill
+│   └── Jupyter Kernel (port 8888) - invisible to ps/pkill
 │
-└── User-Created Contexts (On-demand)
-    ├── Each context has:
-    │   ├── Own Linux namespace (PID, Mount isolation)
-    │   ├── Own environment variables
-    │   ├── Own session state (pwd, shell vars)
-    │   └── Child routing configuration
-    │
-    ├── Platform Context Example:
-    │   ├── ANTHROPIC_API_KEY environment
-    │   ├── Routes children to User Context
-    │   └── Maintains its own pwd/state
-    │
-    └── User Context Example:
-        ├── CLOUDFLARE_API_TOKEN, AWS_KEY environment
-        ├── Isolated from Platform Context
-        └── Maintains its own pwd/state
+└── User Space (Default namespace)
+    ├── Platform Context (AI agents run here)
+    │   └── LD_PRELOAD universal routing
+    └── User Context (AI children run here)
+        └── Has deployment credentials
 ```
 
-**Key Insight**: Contexts unify namespaces (isolation) and sessions (state) into a single abstraction!
+**Key Insight**: We don't need complex isolation - we're already inside Firecracker+Docker! Just hide the control plane and route credentials.
 
 ## Implementation Details
 
-### Phase 1: Container Startup (One-Time Setup)
+### Phase 1: Simplified Container Startup
 
 ```typescript
 // container_src/index.ts
 class ContainerServer {
   private contexts: Map<string, ExecutionContext> = new Map();
-  private controlContext: ExecutionContext;
+  private controlPlanePid: number;
   
   async initialize() {
-    // Step 1: Pre-bind critical ports immediately
-    this.bunServer = Bun.serve({ port: 8080 });
+    // Step 1: Start control plane in hidden PID namespace (simple!)
+    const control = spawn('unshare', [
+      '--pid',           // Hide from ps/pkill
+      '--fork',          // Fork before exec
+      '--mount-proc',    // Separate /proc
+      'sh', '-c', `
+        # Pre-bind ports and start services
+        bun serve --port 8080 &
+        jupyter kernel --port 8888 &
+        sleep infinity  # Keep namespace alive
+      `
+    ]);
+    this.controlPlanePid = control.pid;
     
-    // Step 2: Create control context for infrastructure
-    this.controlContext = await this.createContext({
-      name: '__control__',
-      isolation: 'secure',
-      hidden: true
-    });
+    // Step 2: Initialize LD_PRELOAD router
+    await this.compileUniversalRouter();
+    await this.startRoutingDaemon();
     
-    // Step 3: Start control plane in control context
-    await this.controlContext.exec('jupyter kernel --port 8888');
+    // Step 3: Create default contexts for user code
+    await this.createContext({ name: 'platform' });
+    await this.createContext({ name: 'user' });
     
-    // Step 4: Create default context for backward compatibility
-    await this.createContext({
-      name: 'default',
-      isolation: 'none',
-      persistent: true
-    });
-    
-    console.log('Container initialized with control context');
+    console.log('Control plane hidden, router ready');
   }
   
   private async createNamespaces() {
@@ -494,28 +493,30 @@ export class UniversalRouter {
 
 ## Implementation Timeline
 
-### Week 1: Core Infrastructure
-**Goal**: Context system + universal routing
+### Week 1: Simplified Implementation
+**Goal**: Minimal control plane protection + universal routing
 
-1. **Day 1-2**: Context implementation
-   - Create `container_src/utils/context.ts`
-   - Implement ExecutionContext class
-   - Add persistent shell support
+1. **Day 1**: Control plane isolation
+   - Simple `unshare --pid` for Bun/Jupyter
+   - Verify processes hidden from user code
+   - Test port pre-binding
    
-2. **Day 3**: LD_PRELOAD interceptor
+2. **Day 2**: LD_PRELOAD interceptor
    - Write `universal_router.c`
    - Compile to shared library
-   - Test interception of all exec variants
+   - Test all exec variants
    
-3. **Day 4**: Routing daemon
-   - Create UniversalRouter service
-   - Implement Unix socket communication
-   - Test routing between contexts
+3. **Day 3**: Routing daemon
+   - Unix socket server
+   - Context lookup
+   - Test routing
    
-4. **Day 5**: Integration testing
-   - Test with real AI agents (Claude)
-   - Verify complete isolation
-   - Confirm all child processes route correctly
+4. **Day 4-5**: Integration
+   - Test with Claude Code
+   - Verify credential isolation
+   - Confirm universal routing works
+
+**Note**: This is much simpler than general sandboxing because we're already inside strong isolation (Firecracker+Docker).
 
 ### Week 2: SDK Integration
 **Goal**: Update SDK client with new behavior

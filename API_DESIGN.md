@@ -126,37 +126,47 @@ await user.exec("pwd");  // Output: /my-project
 5. **Stateful Sessions** - Each context maintains pwd, env changes, etc.
 6. **Clear Mental Model** - "Context = Environment + State + Credentials"
 
-## Behind the Scenes: Context Implementation
+## Behind the Scenes: Simplified Architecture
+
+### Important Context
+We're already running inside:
+- **Firecracker VM** (hardware isolation provided by Cloudflare)
+- **Docker Container** (namespace isolation provided by container runtime)
+
+We only need lightweight isolation WITHIN the container to protect our control plane.
 
 ```
-Container (at startup)
-├── Control Context (Hidden, for Bun/Jupyter)
-│   ├── Bun Server (port 8080)
-│   └── Jupyter Kernel (port 8888)
-│
-└── User-Created Contexts (On-demand)
-    ├── Platform Context
-    │   ├── Platform credentials (Anthropic API key)
-    │   ├── Session state (pwd, env vars)
-    │   ├── LD_PRELOAD interceptor enabled
-    │   └── Universal routing → ALL children to User Context
+Firecracker VM (Cloudflare infrastructure)
+└── Docker Container (Our Dockerfile)
+    ├── Control Plane (Hidden via simple PID namespace)
+    │   ├── Bun Server (port 8080) - invisible to user code
+    │   └── Jupyter Kernel (port 8888) - invisible to user code
     │
-    └── User Context
-        ├── User credentials (Cloudflare, AWS)
-        ├── Session state (pwd, env vars)
-        └── Receives ALL commands from Platform's children
+    └── User Space (Default namespace)
+        ├── Platform Context
+        │   ├── AI agents run here (Claude, etc.)
+        │   ├── Has ANTHROPIC_API_KEY
+        │   └── LD_PRELOAD routes ALL children to User Context
+        │
+        └── User Context  
+            ├── All AI agent children run here
+            ├── Has CLOUDFLARE_API_TOKEN, AWS_KEY
+            └── Never sees platform credentials
 ```
 
-### Context Isolation & Routing Mechanism
+### Simplified Isolation Strategy
 
-Each context runs in its own Linux namespace (when available):
-- **PID namespace**: Process isolation
-- **Mount namespace**: Separate /proc view
-- **Session state**: Maintained via persistent shell process
+Since we're already inside Firecracker+Docker, we only need:
 
-#### Universal Routing via LD_PRELOAD
+1. **Control Plane Protection**: Simple `unshare --pid` to hide Bun/Jupyter
+2. **Credential Routing**: LD_PRELOAD universal routing for AI agent children
+3. **Session State**: Persistent shell process per context
 
-We use LD_PRELOAD to intercept ALL subprocess calls from AI agents:
+No complex namespace management needed - we leverage existing container isolation.
+
+#### Our Key Innovation: Universal Routing via LD_PRELOAD
+
+While existing tools (Bubblewrap, gVisor, etc.) solve general sandboxing, none handle our specific need: routing AI agent children to different credential contexts. Our LD_PRELOAD approach elegantly solves this:
 
 ```c
 // When Claude runs ANY command, our interceptor routes it
