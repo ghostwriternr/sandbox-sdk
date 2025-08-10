@@ -152,37 +152,43 @@ Our three issues pass all tests:
 - **Port Hijacking**: ✓ Breaks API, ✓ Can't reclaim port, ✓ Common port conflicts, ✓ Downtime
 - **Credentials**: ✓ Breaks security, ✓ Can't revoke access, ✓ Logging accidents, ✓ Financial loss
 
-## Solution Approach: Targeted Isolation
+## Solution: Three Reusable Namespaces
 
-### For Process Killing → PID Namespace
-```bash
-# User code in isolated PID namespace
-$ ps aux
-PID  CMD
-1    node app.js  # Only sees own processes!
+We create three persistent namespaces at container startup:
 
-$ pkill jupyter
-pkill: no process found  # Can't kill what you can't see
+### 1. Control Namespace (Hidden)
+- Bun server and Jupyter kernel run here
+- Completely invisible to user code
+- Processes can't be killed or interfered with
+
+### 2. User Namespace (Shared)
+- All regular `exec()` commands run here
+- Processes CAN see each other (for debugging)
+- `ps aux`, `htop`, etc. work normally
+- NO credentials ever enter this namespace
+
+### 3. Secure Namespace (Isolated)
+- Commands with `env` option automatically run here
+- Credentials exist only during command execution
+- Cleared after each command completes
+- Isolated from user namespace
+
+### API Design: Single exec() Method
+```typescript
+// Regular command - runs in user namespace
+await sandbox.exec("npm install");
+await sandbox.exec("ps aux");  // Sees other user processes
+
+// Command with credentials - automatically uses secure namespace
+await sandbox.exec("aws s3 deploy", {
+  env: { AWS_ACCESS_KEY_ID: secret }  // Triggers isolation
+});
+
+// Next command has no access to credentials
+await sandbox.exec("echo $AWS_ACCESS_KEY_ID");  // Empty
 ```
 
-### For Port Hijacking → Pre-binding + Network Isolation
-```javascript
-// Control plane pre-binds ports before user code runs
-const server = Bun.serve({ port: 8080 });
-
-// User code later tries to bind
-Bun.serve({ port: 8080 });  // Error: EADDRINUSE
-```
-
-### For Credentials → Execution Context Separation
-```bash
-# Platform operations with credentials in isolated context
-$ unshare --pid --mount bash -c 'AWS_ACCESS_KEY_ID=secret aws s3 ls'
-
-# User code in main context never sees credentials
-$ echo $AWS_ACCESS_KEY_ID
-(empty)  # Never set in user context
-```
+**Key Insight**: The SDK automatically selects the right namespace based on whether credentials are provided. No need for separate `execSecure()` method!
 
 
 
@@ -242,21 +248,27 @@ $ echo $AWS_ACCESS_KEY_ID
 
 Current issue: No enforcement of boundary - all code sees all environment variables.
 
-## Linux Capabilities Available in Production
+## Technical Foundation: Linux Namespaces
 
-### Key Discovery from Testing
-Production Cloudflare Containers have **CAP_SYS_ADMIN** and all other capabilities:
+### Production Capabilities (Confirmed)
+Production Cloudflare Containers have **CAP_SYS_ADMIN**:
 ```bash
 # Production capabilities
 CapEff: 000001ffffffffff  # All capabilities enabled!
 
-# This means we can:
-unshare --pid --fork    # Create PID namespaces ✓
-unshare --net          # Create network namespaces ✓
-unshare --mount        # Create mount namespaces ✓
+# This enables us to create persistent namespaces:
+unshare --pid --fork    # PID isolation ✓
+unshare --mount        # Mount isolation ✓
+nsenter --target=PID   # Join existing namespace ✓
 ```
 
-**Impact**: We can implement complete isolation TODAY without platform changes.
+### Key Implementation Detail
+Namespaces are **reusable** - we create them once at startup and reuse them for all commands:
+- No per-command overhead
+- Consistent isolation boundaries  
+- Predictable performance
+
+**Local Development**: Gracefully falls back to single namespace with warnings.
 
 ## Threat Model
 

@@ -10,282 +10,275 @@ We're focusing ONLY on issues that break the sandbox:
 
 Everything else (resource limits, metadata endpoints, etc.) is nice-to-have but not urgent.
 
-## Key Design Question: User Control vs Transparent Protection
+## API Design Decision: Single Unified exec() Method
 
-### Option 1: Completely Transparent (No API Changes)
-**Everything happens behind the scenes**
+After careful analysis, we've decided on a **single exec() method** that automatically provides security based on context.
 
-```typescript
-// User code stays exactly the same
-const sandbox = getSandbox(env.Sandbox, "my-sandbox");
-await sandbox.exec("npm install");  // Automatically protected
-await sandbox.setEnvVars({ AWS_KEY: secret });  // Automatically isolated
-```
-
-**Pros:**
-- Zero migration effort
-- No learning curve
-- Works with existing code
-
-**Cons:**
-- No way to opt into stricter security
-- Can't distinguish platform vs user operations
-- Credentials still globally visible (just to fewer processes)
-
-### Option 2: Explicit Security Contexts (Recommended)
-**Users choose when they need isolation**
-
-```typescript
-// New API for platform operations with secrets
-await sandbox.execSecure("aws s3 deploy", {
-  env: { AWS_ACCESS_KEY_ID: secret },
-  isolated: true  // Runs in separate namespace
-});
-
-// Regular operations unchanged
-await sandbox.exec("node app.js");  // No secrets, no isolation needed
-```
-
-**Pros:**
-- Clear security boundaries
-- Explicit about what has access to secrets
-- Platform operations clearly separated
-- Minimal API changes
-
-**Cons:**
-- Requires migration for secure operations
-- Users must understand when to use which method
-
-### Option 3: Dual Context API (Most Explicit)
-**Two separate execution contexts**
-
-```typescript
-const sandbox = getSandbox(env.Sandbox, "my-sandbox");
-
-// Platform context for privileged operations
-await sandbox.platform.exec("aws deploy", {
-  env: { AWS_KEY: secret }
-});
-
-// User context for generated code
-await sandbox.user.exec("node app.js");
-```
-
-**Pros:**
-- Clearest mental model
-- Impossible to accidentally expose secrets
-- State separation between contexts
-
-**Cons:**
-- Bigger API change
-- More complex for simple use cases
-
-## Recommended API Design: Explicit Security Contexts
-
-Based on our analysis, we recommend **Option 2** - adding a secure execution method while keeping the existing API for backward compatibility.
-
-### Core API Additions
+### The Simplified API
 
 ```typescript
 interface Sandbox {
-  // Existing methods remain unchanged
-  exec(command: string, options?: ExecOptions): Promise<ExecResult>;
-  setEnvVars(vars: Record<string, string>): Promise<void>;
-  
-  // NEW: Secure execution with isolated credentials
-  execSecure(
-    command: string,
-    options?: SecureExecOptions
+  // One method to rule them all!
+  exec(
+    command: string, 
+    options?: ExecOptions
   ): Promise<ExecResult>;
   
-  // NEW: Check if secure execution is available
-  hasSecureExecution(): Promise<boolean>;
+  // Existing methods remain
+  setEnvVars(vars: Record<string, string>): Promise<void>;
 }
 
-interface SecureExecOptions extends ExecOptions {
-  // Environment variables only visible to this command
+interface ExecOptions {
+  // When env is provided, automatically uses secure namespace
   env?: Record<string, string>;
   
-  // Run in isolated namespace (default: true)
-  isolated?: boolean;
-  
-  // Timeout for the operation
+  // Standard options
+  cwd?: string;
   timeout?: number;
+  sessionId?: string;
 }
 ```
 
-### Usage Examples
+### How It Works
 
-#### Deploying with AI Agent
 ```typescript
-// AI agent needs AWS credentials to deploy
-await sandbox.execSecure('aws lambda deploy function.zip', {
-  env: {
-    AWS_ACCESS_KEY_ID: env.AWS_KEY,
-    AWS_SECRET_ACCESS_KEY: env.AWS_SECRET
+// Regular command - runs in shared user namespace
+await sandbox.exec("npm install");
+await sandbox.exec("node app.js");
+await sandbox.exec("ps aux");  // Can see other user processes
+
+// Command with credentials - automatically uses secure namespace
+await sandbox.exec("aws s3 deploy", {
+  env: { 
+    AWS_ACCESS_KEY_ID: secret,
+    AWS_SECRET_ACCESS_KEY: secretKey
   }
 });
+// ↑ This automatically runs in isolated secure namespace!
 
-// Code the AI wrote runs WITHOUT credentials
-await sandbox.exec('node app.js');  // No access to AWS keys
+// Back to regular commands - no credentials visible
+await sandbox.exec("echo $AWS_ACCESS_KEY_ID");  // Empty
 ```
 
-#### Database Migration
-```typescript
-// Run migration with database credentials
-await sandbox.execSecure('psql -f migrate.sql', {
-  env: {
-    PGPASSWORD: env.DB_PASSWORD,
-    PGHOST: 'prod-db.example.com'
-  }
-});
+### Why This Design Wins
 
-// Start app without database credentials
-await sandbox.exec('npm start');  // Can't directly access DB
+1. **Zero Learning Curve** - Just use exec() like always
+2. **Automatic Security** - Credentials trigger isolation automatically
+3. **No Migration Pain** - Existing code just works
+4. **Clear Mental Model** - "Credentials = Isolated" 
+5. **Optimal Performance** - Only isolated when needed
+
+## Behind the Scenes: Three Reusable Namespaces
+
+```
+Container (at startup, creates 3 persistent namespaces)
+├── Control Namespace (Hidden from user)
+│   ├── Bun Server (port 8080)
+│   └── Jupyter Kernel (port 8888)
+│
+├── User Namespace (Default for exec)
+│   ├── All regular commands run here
+│   ├── Processes can see each other
+│   └── NO credentials ever
+│
+└── Secure Namespace (When env provided)
+    ├── Isolated from user namespace
+    ├── Credentials exist only during command
+    └── Cleared after each use
 ```
 
-#### Package Installation
-```typescript
-// Install packages in isolated environment
-// Prevents postinstall scripts from accessing secrets
-await sandbox.execSecure('npm install untrusted-package', {
-  isolated: true,
-  env: {}  // No secrets during installation
-});
-```
-
-### Backward Compatibility
+### The Magic: Automatic Namespace Selection
 
 ```typescript
-// Old code continues to work (with security warning)
-await sandbox.setEnvVars({ AWS_KEY: secret });
-await sandbox.exec('aws s3 ls');  // Works but logs warning
-
-// Migration path
-if (await sandbox.hasSecureExecution()) {
-  // Use new secure API
-  await sandbox.execSecure('aws s3 ls', { env: { AWS_KEY: secret }});
-} else {
-  // Fall back to old method
-  console.warn('Secure execution not available');
-  await sandbox.setEnvVars({ AWS_KEY: secret });
-  await sandbox.exec('aws s3 ls');
-}
-```
-
-### Why This Design?
-
-1. **Minimal API Surface**: Just two new methods
-2. **Clear Security Boundary**: `execSecure` = with secrets, `exec` = without
-3. **Backward Compatible**: Existing code continues to work
-4. **Progressive Enhancement**: Can detect and use when available
-5. **Simple Mental Model**: "Use execSecure for operations with credentials"
-
-## Implementation Behind the Scenes
-
-### For Process Killing Prevention
-```typescript
-// Bun server automatically runs control plane in hidden namespace
 class ContainerServer {
-  async start() {
-    // Control plane components start in isolated PID namespace
-    await this.startInNamespace({
-      jupyter: 'jupyter kernel',
-      bun: 'bun serve --port 8080'
-    });
-    // User code can't see or kill these processes
-  }
-}
-```
-
-### For Port Protection  
-```typescript
-// Pre-bind critical ports before user code runs
-class ContainerServer {
+  private namespaces = {
+    control: null,  // Created once, hidden forever
+    user: null,     // Created once, reused for all regular exec
+    secure: null    // Created once, reused for all secure exec
+  };
+  
   async initialize() {
-    // Bind ports immediately on container start
-    this.bunServer = Bun.serve({ port: 8080 });
-    this.jupyterServer = new JupyterKernel({ port: 8888 });
-    // User code gets EADDRINUSE if they try to bind
+    // Create all three namespaces at container startup
+    this.namespaces.control = await this.createNamespace({ hidden: true });
+    this.namespaces.user = await this.createNamespace({ shared: true });
+    this.namespaces.secure = await this.createNamespace({ isolated: true });
+    
+    // Start control plane in its namespace
+    await this.namespaces.control.exec('bun serve --port 8080');
+    await this.namespaces.control.exec('jupyter kernel --port 8888');
+  }
+  
+  async exec(command: string, options?: ExecOptions) {
+    // Smart namespace selection
+    if (options?.env && Object.keys(options.env).length > 0) {
+      // Has credentials? Use secure namespace
+      return this.namespaces.secure.exec(command, {
+        ...options,
+        env: { PATH: '/usr/bin:/bin', ...options.env }
+      });
+    } else {
+      // No credentials? Use shared user namespace
+      return this.namespaces.user.exec(command, options);
+    }
   }
 }
 ```
 
-### For Credential Isolation
+### What This Means for Users
+
+| Command | Namespace Used | Can See | Has Access To |
+|---------|---------------|---------|---------------|
+| `exec("ls")` | User | Other user processes | No credentials |
+| `exec("ps aux")` | User | Other user processes | No credentials |
+| `exec("npm install")` | User | Other user processes | No credentials |
+| `exec("aws deploy", {env: {AWS_KEY}})` | Secure | Only its own process | AWS_KEY only |
+| `exec("node app.js")` | User | Other user processes | No credentials |
+
+## Implementation Details
+
+### Startup Sequence
+
 ```typescript
-// execSecure implementation
-async execSecure(command: string, options?: SecureExecOptions) {
-  if (!this.hasCapSysAdmin()) {
-    // Fallback for local dev
-    return this.execWithWarning(command, options);
-  }
+// Container startup (happens once)
+async function initializeContainer() {
+  // Step 1: Pre-bind critical ports
+  const bunServer = Bun.serve({ port: 8080 });
   
-  // Create isolated namespace for this execution
-  const result = await this.runInNamespace(command, {
-    env: options?.env || {},
-    mount: ['--mount'],  // Separate /proc
-    pid: ['--pid'],      // Separate process tree
-  });
+  // Step 2: Create three persistent namespaces
+  const controlNS = await createNamespace('control', { hidden: true });
+  const userNS = await createNamespace('user', { shared: true });
+  const secureNS = await createNamespace('secure', { isolated: true });
   
-  return result;
+  // Step 3: Start Jupyter in control namespace
+  await controlNS.exec('jupyter kernel --port 8888');
+  
+  // Ready to accept commands!
 }
 ```
 
-## Benefits for SDK Users
+### How exec() Routes Commands
 
-### What They Get Automatically (No Code Changes)
+```typescript
+async function exec(command: string, options?: ExecOptions) {
+  // Decision tree for namespace selection
+  if (options?.env && Object.keys(options.env).length > 0) {
+    // Has environment variables → Secure namespace
+    return await secureNS.exec(command, {
+      env: { 
+        PATH: process.env.PATH,  // Preserve PATH
+        HOME: '/workspace',       // Standard HOME
+        ...options.env           // User-provided secrets
+      },
+      clearEnvAfter: true  // Clean up after execution
+    });
+  } else {
+    // No environment variables → User namespace  
+    return await userNS.exec(command, options);
+  }
+}
+```
 
-1. **Control Plane Protection**: Jupyter/Bun can't be killed
-2. **Port Protection**: Ports 8080/8888 are pre-reserved
+### Namespace Implementation (Linux)
+
+```typescript
+// Creating reusable namespaces
+function createNamespace(name: string, opts: NamespaceOptions) {
+  // Create namespace and keep it alive
+  const proc = spawn('unshare', [
+    '--pid',      // Separate process tree
+    '--mount',    // Separate mount points
+    '--fork',     // Fork before exec
+    'sh', '-c', 'sleep infinity'  // Keep namespace alive
+  ]);
+  
+  const nsPath = `/proc/${proc.pid}/ns/pid`;
+  
+  return {
+    // Execute commands in this namespace
+    exec: async (cmd: string, options?: {}) => {
+      return spawn('nsenter', [
+        `--pid=${nsPath}`,  // Enter the namespace
+        '--', 
+        'sh', '-c', cmd
+      ], options);
+    },
+    
+    // Namespace persists until container shutdown
+    destroy: () => proc.kill()
+  };
+}
+```
+
+## What SDK Users Get
+
+### Automatic Protection (Zero Code Changes)
+
+1. **Control Plane Protection**: Jupyter/Bun can't be killed by user code
+2. **Port Protection**: Ports 8080/8888 pre-reserved at startup
 3. **Process Isolation**: Control plane hidden from `ps aux`
 
-### What They Get with Migration (Using execSecure)
+### Credential Isolation (Automatic with env option)
 
-1. **Credential Isolation**: Secrets never in global environment
-2. **Scoped Access**: Credentials only available to specific commands
-3. **Audit Trail**: Can log all secure executions
-4. **Time-Limited Exposure**: Credentials exist only during execution
+```typescript
+// Just pass env to get isolation - that's it!
+await sandbox.exec("aws s3 deploy", {
+  env: { AWS_KEY: secret }  // Automatically isolated
+});
+```
+
+- Credentials never in global environment
+- Scoped to single command only  
+- No cross-contamination between commands
+- Automatic cleanup after execution
 
 ## Migration Guide
 
-### Step 1: Identify Credential Usage
+### Old Pattern (Insecure)
 ```typescript
-// Look for patterns like:
-await sandbox.setEnvVars({ AWS_KEY: secret });
-await sandbox.exec('aws s3 ls');
-```
-
-### Step 2: Replace with Secure Execution
-```typescript
-// Change to:
-await sandbox.execSecure('aws s3 ls', {
-  env: { AWS_KEY: secret }
-});
-```
-
-### Step 3: Remove Global Environment Variables
-```typescript
-// Remove calls to setEnvVars() for secrets
-// Keep it only for non-sensitive config:
+// DON'T: Global environment variables
 await sandbox.setEnvVars({ 
-  NODE_ENV: 'development',  // OK - not secret
-  PORT: '3000'              // OK - not secret
+  AWS_ACCESS_KEY_ID: secret,
+  AWS_SECRET_ACCESS_KEY: secretKey
 });
+await sandbox.exec('aws s3 ls');  // Has access
+await sandbox.exec('node app.js'); // ALSO has access (bad!)
 ```
+
+### New Pattern (Secure)
+```typescript
+// DO: Scoped environment variables
+await sandbox.exec('aws s3 ls', {
+  env: { 
+    AWS_ACCESS_KEY_ID: secret,
+    AWS_SECRET_ACCESS_KEY: secretKey
+  }
+});  // Only this command has access
+
+await sandbox.exec('node app.js'); // No access (good!)
+```
+
+### That's It!
+Literally just move your secrets from `setEnvVars()` to the `env` option of `exec()`. The SDK handles the isolation automatically.
 
 ## FAQ
 
-**Q: Do I have to change my code?**
-A: No, but you should for security. Control plane protection happens automatically.
+**Q: Do I need to change my code?**
+A: Only if you're using `setEnvVars()` for secrets. Move them to `exec(cmd, {env})` instead.
 
-**Q: What about existing setEnvVars() calls?**
-A: They continue to work but with security warnings for sensitive-looking keys.
+**Q: What if I'm running locally without CAP_SYS_ADMIN?**
+A: The SDK falls back gracefully - you get a warning but everything still works.
 
-**Q: How do I know if secure execution is available?**
-A: Use `hasSecureExecution()` to check (returns true in production, false in local dev).
+**Q: Can processes see each other?**
+A: Yes! Regular commands in the user namespace can see each other (for debugging). Only secure commands are isolated.
 
-**Q: Can I still use environment variables for non-secrets?**
-A: Yes! Use `setEnvVars()` for configuration, `execSecure()` for secrets.
+**Q: What about setEnvVars()?**
+A: Still works for non-secrets like NODE_ENV, PORT, etc. Just don't use it for credentials.
 
-**Q: What's the performance impact?**
-A: Minimal - namespace creation adds <5ms per execution.
+**Q: Performance impact?**
+A: Near zero. Namespaces are created once at startup, not per command.
+
+**Q: Can I debug my processes?**
+A: Yes! `ps aux`, `htop`, etc. work normally in the user namespace.
+
+**Q: How does the SDK know what's a credential?**
+A: It doesn't! It just isolates any command that has the `env` option.
