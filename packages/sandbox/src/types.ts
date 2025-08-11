@@ -371,12 +371,122 @@ export interface ISandbox {
   cleanupCompletedProcesses(): Promise<number>;
   getProcessLogs(id: string): Promise<{ stdout: string; stderr: string }>;
 
+  // File operations
+  gitCheckout(repoUrl: string, options: { branch?: string; targetDir?: string }): Promise<GitCheckoutResponse>;
+  mkdir(path: string, options?: { recursive?: boolean }): Promise<MkdirResponse>;
+  writeFile(path: string, content: string, options?: { encoding?: string }): Promise<WriteFileResponse>;
+  deleteFile(path: string): Promise<DeleteFileResponse>;
+  renameFile(oldPath: string, newPath: string): Promise<RenameFileResponse>;
+  moveFile(sourcePath: string, destinationPath: string): Promise<MoveFileResponse>;
+  readFile(path: string, options?: { encoding?: string }): Promise<ReadFileResponse>;
+  listFiles(path: string, options?: { recursive?: boolean; includeHidden?: boolean }): Promise<ListFilesResponse>;
+
+  // Port management
+  exposePort(port: number, options: { name?: string; hostname: string }): Promise<{ url: string; port: number; name?: string }>;
+  unexposePort(port: number): Promise<void>;
+  getExposedPorts(hostname: string): Promise<Array<{ url: string; port: number; name?: string; exposedAt: string }>>;
+
+  // Environment management
+  setEnvVars(envVars: Record<string, string>): Promise<void>;
+  setSandboxName(name: string): Promise<void>;
+
   // Code Interpreter API
   createCodeContext(options?: CreateContextOptions): Promise<CodeContext>;
   runCode(code: string, options?: RunCodeOptions): Promise<ExecutionResult>;
   runCodeStream(code: string, options?: RunCodeOptions): Promise<ReadableStream>;
   listCodeContexts(): Promise<CodeContext[]>;
   deleteCodeContext(contextId: string): Promise<void>;
+}
+
+// API Response Types
+
+export interface ExecuteResponse {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  command: string;
+  timestamp: string;
+}
+
+export interface GitCheckoutResponse {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  repoUrl: string;
+  branch: string;
+  targetDir: string;
+  timestamp: string;
+}
+
+export interface MkdirResponse {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  path: string;
+  recursive: boolean;
+  timestamp: string;
+}
+
+export interface WriteFileResponse {
+  success: boolean;
+  exitCode: number;
+  path: string;
+  timestamp: string;
+}
+
+export interface ReadFileResponse {
+  success: boolean;
+  exitCode: number;
+  path: string;
+  content: string;
+  timestamp: string;
+}
+
+export interface DeleteFileResponse {
+  success: boolean;
+  exitCode: number;
+  path: string;
+  timestamp: string;
+}
+
+export interface RenameFileResponse {
+  success: boolean;
+  exitCode: number;
+  oldPath: string;
+  newPath: string;
+  timestamp: string;
+}
+
+export interface MoveFileResponse {
+  success: boolean;
+  exitCode: number;
+  sourcePath: string;
+  destinationPath: string;
+  timestamp: string;
+}
+
+export interface ListFilesResponse {
+  success: boolean;
+  exitCode: number;
+  path: string;
+  files: Array<{
+    name: string;
+    absolutePath: string;
+    relativePath: string;
+    type: 'file' | 'directory' | 'symlink' | 'other';
+    size: number;
+    modifiedAt: string;
+    mode: string;
+    permissions: {
+      readable: boolean;
+      writable: boolean;
+      executable: boolean;
+    };
+  }>;
+  timestamp: string;
 }
 
 // Type Guards

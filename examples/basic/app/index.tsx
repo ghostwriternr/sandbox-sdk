@@ -3,6 +3,35 @@ import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 
+// Type definitions
+interface FileInfo {
+  name: string;
+  absolutePath: string;
+  relativePath: string;
+  type: 'file' | 'directory' | 'symlink' | 'other';
+  size: number;
+  modifiedAt: string;
+  mode: string;
+  permissions: {
+    readable: boolean;
+    writable: boolean;
+    executable: boolean;
+  };
+}
+
+interface ListFilesOptions {
+  recursive?: boolean;
+  includeHidden?: boolean;
+}
+
+interface ListFilesResponse {
+  success: boolean;
+  path: string;
+  files: FileInfo[];
+  count: number;
+  timestamp: string;
+}
+
 // Simple API client to replace direct HttpClient usage
 class SandboxApiClient {
   private baseUrl: string;
@@ -241,6 +270,13 @@ class SandboxApiClient {
     return this.doFetch("/api/move", {
       method: "POST",
       body: JSON.stringify({ sourcePath, destinationPath }),
+    });
+  }
+
+  async listFiles(path: string, options: ListFilesOptions = {}): Promise<ListFilesResponse> {
+    return this.doFetch("/api/list-files", {
+      method: "POST",
+      body: JSON.stringify({ path, options }),
     });
   }
 
@@ -1385,6 +1421,10 @@ function FilesTab({
   const [moveSourcePath, setMoveSourcePath] = useState("");
   const [moveDestPath, setMoveDestPath] = useState("");
   const [deleteFilePath, setDeleteFilePath] = useState("");
+  const [listPath, setListPath] = useState("/workspace");
+  const [listRecursive, setListRecursive] = useState(false);
+  const [listHidden, setListHidden] = useState(false);
+  const [listedFiles, setListedFiles] = useState<FileInfo[]>([]);
 
   // Git Operations
   const [gitRepoUrl, setGitRepoUrl] = useState("");
@@ -1465,6 +1505,63 @@ function FilesTab({
       setDeleteFilePath("");
     } catch (error: any) {
       addResult("error", `Failed to delete: ${error.message}`);
+    }
+  };
+
+  const handleListFiles = async () => {
+    if (!client || !listPath.trim()) return;
+    try {
+      const result = await client.listFiles(listPath, {
+        recursive: listRecursive,
+        includeHidden: listHidden,
+      });
+      
+      // Sort files for proper tree display using relativePath
+      const sortedFiles = (result.files || []).sort((a, b) => {
+        // Use relativePath for cleaner sorting
+        const aSegments = a.relativePath.split('/').filter(s => s);
+        const bSegments = b.relativePath.split('/').filter(s => s);
+        
+        // Compare segment by segment
+        const minLength = Math.min(aSegments.length, bSegments.length);
+        
+        for (let i = 0; i < minLength; i++) {
+          // If we're at the last segment for either path
+          const aIsLast = i === aSegments.length - 1;
+          const bIsLast = i === bSegments.length - 1;
+          
+          // If one is a parent of the other
+          if (aIsLast && !bIsLast) {
+            // a is a parent directory of b (if a is a directory)
+            return a.type === 'directory' ? -1 : 1;
+          }
+          if (!aIsLast && bIsLast) {
+            // b is a parent directory of a (if b is a directory)
+            return b.type === 'directory' ? 1 : -1;
+          }
+          
+          // If both are at the same level (both last or both not last)
+          if (aIsLast && bIsLast) {
+            // Same directory level - directories first, then alphabetical
+            if (a.type === 'directory' && b.type !== 'directory') return -1;
+            if (a.type !== 'directory' && b.type === 'directory') return 1;
+          }
+          
+          // Compare the segments alphabetically
+          const segmentCompare = aSegments[i].localeCompare(bSegments[i]);
+          if (segmentCompare !== 0) return segmentCompare;
+        }
+        
+        // If we get here, one path is a prefix of the other
+        // The shorter path (parent) should come first
+        return aSegments.length - bSegments.length;
+      });
+      
+      setListedFiles(sortedFiles);
+      addResult("success", `Listed ${result.count || 0} files in: ${listPath}`);
+    } catch (error: any) {
+      addResult("error", `Failed to list files: ${error.message}`);
+      setListedFiles([]);
     }
   };
 
@@ -1657,6 +1754,91 @@ function FilesTab({
               Delete
             </button>
           </div>
+        </div>
+
+        {/* List Files */}
+        <div className="operation-group">
+          <h3>List Files</h3>
+          <div className="input-group">
+            <input
+              type="text"
+              placeholder="Directory path (e.g., /workspace)"
+              value={listPath}
+              onChange={(e) => setListPath(e.target.value)}
+              className="file-input"
+            />
+            <button
+              onClick={handleListFiles}
+              disabled={!listPath.trim() || connectionStatus !== "connected"}
+              className="action-button"
+            >
+              List Files
+            </button>
+          </div>
+          <div className="list-options">
+            <label>
+              <input
+                type="checkbox"
+                checked={listRecursive}
+                onChange={(e) => setListRecursive(e.target.checked)}
+              />
+              Recursive
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={listHidden}
+                onChange={(e) => setListHidden(e.target.checked)}
+              />
+              Include Hidden
+            </label>
+          </div>
+          {listedFiles.length > 0 && (
+            <div className="file-list-results">
+              <h4>Files ({listedFiles.length}):</h4>
+              <div className="file-list">
+                {listedFiles.map((file, index) => {
+                  // Calculate indentation level using the relativePath field
+                  const depth = listRecursive ? (file.relativePath.split('/').filter(s => s).length - 1) : 0;
+                  
+                  // For directories, add a trailing slash for clarity
+                  const displayName = file.type === 'directory' ? `${file.name}/` : file.name;
+                  
+                  // Add tree-like prefix for better hierarchy visualization
+                  const treePrefix = depth > 0 ? '├── ' : '';
+                  
+                  return (
+                    <div 
+                      key={index} 
+                      className="file-item"
+                      style={{ 
+                        paddingLeft: `${depth * 16 + 8}px`,
+                        fontWeight: file.type === 'directory' ? '500' : 'normal'
+                      }}
+                    >
+                      {depth > 0 && <span className="tree-prefix">{treePrefix}</span>}
+                      <span className="file-icon">
+                        {file.type === 'directory' ? '📁' : 
+                         file.permissions.executable ? '⚙️' : '📄'}
+                      </span>
+                      <span className="file-mode">{file.mode}</span>
+                      <span className="file-name" title={file.absolutePath}>
+                        {displayName}
+                      </span>
+                      <span className="file-details">
+                        {file.type === 'file' && (
+                          <span className="file-size">{file.size.toLocaleString()} bytes</span>
+                        )}
+                        <span className="file-date">
+                          {new Date(file.modifiedAt).toLocaleDateString()}
+                        </span>
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       </div>
       {/* Git Operations */}
@@ -3047,7 +3229,7 @@ result = x / y`,
 }
 
 function SandboxTester() {
-  const [activeTab, setActiveTab] = useState<TabType>("notebook");
+  const [activeTab, setActiveTab] = useState<TabType>("commands");
   const [client, setClient] = useState<SandboxApiClient | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<
     "disconnected" | "connecting" | "connected"

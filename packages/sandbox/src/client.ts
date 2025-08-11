@@ -2,21 +2,22 @@ import type { ExecuteRequest } from "../container_src/types";
 import type { Sandbox } from "./index";
 import type {
   BaseExecOptions,
+  DeleteFileResponse,
+  ExecuteResponse,
   GetProcessLogsResponse,
   GetProcessResponse,
+  GitCheckoutResponse,
+  ListFilesResponse,
   ListProcessesResponse,
+  MkdirResponse,
+  MoveFileResponse,
+  ReadFileResponse,
+  RenameFileResponse,
   StartProcessRequest,
   StartProcessResponse,
+  WriteFileResponse,
 } from "./types";
 
-export interface ExecuteResponse {
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-  command: string;
-  timestamp: string;
-}
 
 interface CommandsResponse {
   availableCommands: string[];
@@ -30,16 +31,6 @@ interface GitCheckoutRequest {
   sessionId?: string;
 }
 
-export interface GitCheckoutResponse {
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-  repoUrl: string;
-  branch: string;
-  targetDir: string;
-  timestamp: string;
-}
 
 interface MkdirRequest {
   path: string;
@@ -47,15 +38,6 @@ interface MkdirRequest {
   sessionId?: string;
 }
 
-export interface MkdirResponse {
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-  path: string;
-  recursive: boolean;
-  timestamp: string;
-}
 
 interface WriteFileRequest {
   path: string;
@@ -64,12 +46,6 @@ interface WriteFileRequest {
   sessionId?: string;
 }
 
-export interface WriteFileResponse {
-  success: boolean;
-  exitCode: number;
-  path: string;
-  timestamp: string;
-}
 
 interface ReadFileRequest {
   path: string;
@@ -77,25 +53,12 @@ interface ReadFileRequest {
   sessionId?: string;
 }
 
-export interface ReadFileResponse {
-  success: boolean;
-  exitCode: number;
-  path: string;
-  content: string;
-  timestamp: string;
-}
 
 interface DeleteFileRequest {
   path: string;
   sessionId?: string;
 }
 
-export interface DeleteFileResponse {
-  success: boolean;
-  exitCode: number;
-  path: string;
-  timestamp: string;
-}
 
 interface RenameFileRequest {
   oldPath: string;
@@ -103,13 +66,6 @@ interface RenameFileRequest {
   sessionId?: string;
 }
 
-export interface RenameFileResponse {
-  success: boolean;
-  exitCode: number;
-  oldPath: string;
-  newPath: string;
-  timestamp: string;
-}
 
 interface MoveFileRequest {
   sourcePath: string;
@@ -117,13 +73,16 @@ interface MoveFileRequest {
   sessionId?: string;
 }
 
-export interface MoveFileResponse {
-  success: boolean;
-  exitCode: number;
-  sourcePath: string;
-  destinationPath: string;
-  timestamp: string;
+
+interface ListFilesRequest {
+  path: string;
+  options?: {
+    recursive?: boolean;
+    includeHidden?: boolean;
+  };
+  sessionId?: string;
 }
+
 
 interface PreviewInfo {
   url: string;
@@ -615,6 +574,50 @@ export class HttpClient {
       return data;
     } catch (error) {
       console.error("[HTTP Client] Error moving file:", error);
+      throw error;
+    }
+  }
+
+  async listFiles(
+    path: string,
+    options?: {
+      recursive?: boolean;
+      includeHidden?: boolean;
+    },
+    sessionId?: string
+  ): Promise<ListFilesResponse> {
+    try {
+      const targetSessionId = sessionId || this.sessionId;
+
+      const response = await this.doFetch(`/api/list-files`, {
+        body: JSON.stringify({
+          path,
+          options,
+          sessionId: targetSessionId,
+        } as ListFilesRequest),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        const errorData = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        throw new Error(
+          errorData.error || `HTTP error! status: ${response.status}`
+        );
+      }
+
+      const data: ListFilesResponse = await response.json();
+      console.log(
+        `[HTTP Client] Listed ${data.files.length} files in: ${path}, Success: ${data.success}`
+      );
+
+      return data;
+    } catch (error) {
+      console.error("[HTTP Client] Error listing files:", error);
       throw error;
     }
   }

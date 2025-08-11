@@ -1,14 +1,5 @@
-// Export types from client
-export type {
-  DeleteFileResponse,
-  ExecuteResponse,
-  GitCheckoutResponse,
-  MkdirResponse,
-  MoveFileResponse,
-  ReadFileResponse,
-  RenameFileResponse,
-  WriteFileResponse,
-} from "./client";
+// Export API response types
+
 // Export errors
 export {
   CodeExecutionError,
@@ -50,5 +41,16 @@ export {
   parseSSEStream,
   responseToAsyncIterable,
 } from "./sse-parser";
-// Export event types for streaming
-export type { ExecEvent, LogEvent } from "./types";
+export type {
+  DeleteFileResponse,
+  ExecEvent,
+  ExecuteResponse,
+  GitCheckoutResponse,
+  ListFilesResponse,
+  LogEvent,
+  MkdirResponse,
+  MoveFileResponse,
+  ReadFileResponse,
+  RenameFileResponse,
+  WriteFileResponse
+} from "./types";
