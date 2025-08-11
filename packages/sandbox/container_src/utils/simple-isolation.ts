@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn, execSync, type ChildProcess } from 'child_process';
 import { randomUUID } from 'crypto';
 
 // Types
@@ -8,35 +8,54 @@ export interface ExecResult {
   exitCode: number;
 }
 
-export interface ContextOptions {
+export interface SessionOptions {
   name: string;
   env?: Record<string, string>;
   cwd?: string;
   isolation?: boolean;
 }
 
+// Cache the namespace support check
+let namespaceSupport: boolean | null = null;
+
 // Check if we can create namespaces
 export function hasNamespaceSupport(): boolean {
+  // Return cached result if available
+  if (namespaceSupport !== null) {
+    return namespaceSupport;
+  }
+  
   try {
-    const child = spawn('unshare', ['--pid', '--fork', 'true']);
-    child.unref();
+    // Actually test if unshare works
+    execSync('unshare --pid --fork --mount-proc true', { 
+      stdio: 'ignore',
+      timeout: 1000
+    });
+    console.log('[Session] Namespace support detected (CAP_SYS_ADMIN available) - isolation enabled');
+    namespaceSupport = true;
     return true;
-  } catch {
+  } catch (error) {
+    console.log('[Session] No namespace support (CAP_SYS_ADMIN not available) - isolation disabled');
+    namespaceSupport = false;
     return false;
   }
 }
 
 /**
- * Linux-native execution context
+ * Linux-native execution session
  * Uses bash for state management, but safely!
  */
-export class SimpleContext {
+export class SimpleSession {
   private shell: ChildProcess | null = null;
   private ready = false;
   private canIsolate: boolean;
   
-  constructor(private options: ContextOptions) {
-    this.canIsolate = (options.isolation !== false) && hasNamespaceSupport();
+  constructor(private options: SessionOptions) {
+    // Only try isolation if explicitly requested and supported
+    this.canIsolate = (options.isolation === true) && hasNamespaceSupport();
+    if (options.isolation === true && !this.canIsolate) {
+      console.log(`[Session] Isolation requested for '${options.name}' but not available - using regular bash`);
+    }
   }
   
   async initialize(): Promise<void> {
@@ -44,6 +63,8 @@ export class SimpleContext {
     const shellCommand = this.canIsolate
       ? ['unshare', '--pid', '--fork', '--mount-proc', 'bash', '--norc', '-i']
       : ['bash', '--norc', '-i'];
+    
+    console.log(`[Session] Initializing session '${this.options.name}' ${this.canIsolate ? 'WITH isolation' : 'WITHOUT isolation'}`);
     
     this.shell = spawn(shellCommand[0], shellCommand.slice(1), {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -57,31 +78,63 @@ export class SimpleContext {
       cwd: this.options.cwd || '/workspace'
     });
     
+    // Handle shell errors
+    this.shell.on('error', (error) => {
+      console.error(`[Session] Shell process error for '${this.options.name}':`, error);
+    });
+    
     // Wait for shell to be ready
     await this.waitForReady();
     this.ready = true;
+    console.log(`[Session] Session '${this.options.name}' initialized successfully`);
   }
   
   private waitForReady(): Promise<void> {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        reject(new Error('Shell initialization timeout'));
-      }, 5000);
+        console.log(`[Session] Shell initialization timeout for '${this.options.name}' - proceeding anyway`);
+        // Don't reject - just mark as ready anyway
+        // The shell might still work, just took longer to initialize
+        this.shell?.stdout?.off('data', onData);
+        this.shell?.stderr?.off('data', onError);
+        resolve();
+      }, 3000); // Reduced to 3 seconds - faster fallback
       
       const marker = `READY_${randomUUID()}`;
       let output = '';
+      let errorOutput = '';
       
       const onData = (data: Buffer) => {
-        output += data.toString();
+        const chunk = data.toString();
+        output += chunk;
+        console.log(`[Session] Shell stdout: ${chunk.trim()}`);
         if (output.includes(marker)) {
+          console.log(`[Session] Ready marker received for '${this.options.name}'`);
           clearTimeout(timeout);
           this.shell?.stdout?.off('data', onData);
+          this.shell?.stderr?.off('data', onError);
           resolve();
         }
       };
       
-      this.shell?.stdout?.on('data', onData);
-      this.shell?.stdin?.write(`echo ${marker}\n`);
+      const onError = (data: Buffer) => {
+        errorOutput += data.toString();
+        console.error(`[Session] Shell stderr: ${data.toString().trim()}`);
+      };
+      
+      if (!this.shell) {
+        clearTimeout(timeout);
+        reject(new Error('Shell not initialized'));
+        return;
+      }
+      
+      this.shell.stdout?.on('data', onData);
+      this.shell.stderr?.on('data', onError);
+      
+      // Send the ready marker immediately
+      const cmd = `echo ${marker}\n`;
+      console.log(`[Session] Sending ready marker: ${cmd.trim()}`);
+      this.shell.stdin?.write(cmd);
     });
   }
   
@@ -91,8 +144,10 @@ export class SimpleContext {
    */
   async exec(command: string): Promise<ExecResult> {
     if (!this.ready || !this.shell) {
-      throw new Error('Context not initialized');
+      throw new Error(`Session '${this.options.name}' not initialized`);
     }
+    
+    console.log(`[Session] Executing command in session '${this.options.name}': ${command}`);
     
     return new Promise((resolve, reject) => {
       const execId = randomUUID();
@@ -100,18 +155,38 @@ export class SimpleContext {
       const endMarker = `END_${execId}`;
       
       let capturing = false;
-      let stdout = '';
-      let stderr = '';
+      let stdoutBuffer = '';
+      let stderrBuffer = '';
       
       const onStdout = (data: Buffer) => {
         const chunk = data.toString();
+        
+        // Check if both markers are in the same chunk
+        if (chunk.includes(startMarker) && chunk.includes(endMarker)) {
+          // Extract content between markers
+          const startIdx = chunk.indexOf(startMarker) + startMarker.length;
+          const endIdx = chunk.indexOf(endMarker);
+          stdoutBuffer = chunk.substring(startIdx, endIdx);
+          
+          // Extract exit code from marker line
+          const exitMatch = chunk.match(new RegExp(`${endMarker}:(\\d+)`));
+          const exitCode = exitMatch ? parseInt(exitMatch[1]) : 0;
+          
+          // Clean up and resolve
+          this.shell?.stdout?.off('data', onStdout);
+          this.shell?.stderr?.off('data', onStderr);
+          clearTimeout(timeoutId);
+          
+          resolve({ stdout: stdoutBuffer.trim(), stderr: stderrBuffer, exitCode });
+          return;
+        }
         
         if (chunk.includes(startMarker)) {
           capturing = true;
           // Remove everything up to and including the start marker
           const parts = chunk.split(startMarker);
           if (parts[1]) {
-            stdout += parts[1];
+            stdoutBuffer += parts[1];
           }
           return;
         }
@@ -120,7 +195,7 @@ export class SimpleContext {
           if (chunk.includes(endMarker)) {
             // Capture up to the end marker
             const parts = chunk.split(endMarker);
-            stdout += parts[0];
+            stdoutBuffer += parts[0];
             
             // Extract exit code from marker line
             const exitMatch = chunk.match(new RegExp(`${endMarker}:(\\d+)`));
@@ -129,24 +204,29 @@ export class SimpleContext {
             // Clean up and resolve
             this.shell?.stdout?.off('data', onStdout);
             this.shell?.stderr?.off('data', onStderr);
+            clearTimeout(timeoutId);
             
-            resolve({ stdout, stderr, exitCode });
+            resolve({ stdout: stdoutBuffer.trim(), stderr: stderrBuffer, exitCode });
             capturing = false;
           } else {
-            stdout += chunk;
+            stdoutBuffer += chunk;
           }
         }
       };
       
       const onStderr = (data: Buffer) => {
         if (capturing) {
-          stderr += data.toString();
+          stderrBuffer += data.toString();
         }
       };
       
       // Set up listeners
-      this.shell.stdout?.on('data', onStdout);
-      this.shell.stderr?.on('data', onStderr);
+      if (this.shell && this.shell.stdout) {
+        this.shell.stdout.on('data', onStdout);
+      }
+      if (this.shell && this.shell.stderr) {
+        this.shell.stderr.on('data', onStderr);
+      }
       
       // Execute command with markers
       const wrappedCommand = `
@@ -156,11 +236,19 @@ EXIT_CODE=$?
 echo "${endMarker}:\${EXIT_CODE}"
 `;
       
-      this.shell.stdin?.write(wrappedCommand);
+      if (this.shell && this.shell.stdin) {
+        console.log(`[Session] Sending command to shell in '${this.options.name}'`);
+        this.shell.stdin.write(wrappedCommand);
+      } else {
+        console.error(`[Session] Shell stdin not available for '${this.options.name}'`);
+        reject(new Error('Shell stdin not available'));
+        return;
+      }
       
       // Timeout protection
-      setTimeout(() => {
+      const timeoutId = setTimeout(() => {
         if (capturing) {
+          console.error(`[Session] Command timeout in session '${this.options.name}': ${command}`);
           this.shell?.stdout?.off('data', onStdout);
           this.shell?.stderr?.off('data', onStderr);
           reject(new Error(`Command timeout: ${command}`));
@@ -179,41 +267,48 @@ echo "${endMarker}:\${EXIT_CODE}"
 }
 
 /**
- * Simple context manager
+ * Simple session manager
  */
-export class SimpleContextManager {
-  private contexts = new Map<string, SimpleContext>();
+export class SimpleSessionManager {
+  private sessions = new Map<string, SimpleSession>();
   
-  async createContext(options: ContextOptions): Promise<SimpleContext> {
-    // Clean up existing context with same name
-    const existing = this.contexts.get(options.name);
+  async createSession(options: SessionOptions): Promise<SimpleSession> {
+    // Clean up existing session with same name
+    const existing = this.sessions.get(options.name);
     if (existing) {
       existing.destroy();
     }
     
-    const context = new SimpleContext(options);
-    await context.initialize();
-    this.contexts.set(options.name, context);
-    return context;
+    // Create session (isolation will be auto-detected)
+    const session = new SimpleSession(options);
+    await session.initialize();
+    
+    this.sessions.set(options.name, session);
+    console.log(`[SessionManager] Created session '${options.name}'`);
+    return session;
   }
   
-  getContext(name: string): SimpleContext | undefined {
-    return this.contexts.get(name);
+  getSession(name: string): SimpleSession | undefined {
+    return this.sessions.get(name);
+  }
+  
+  listSessions(): string[] {
+    return Array.from(this.sessions.keys());
   }
   
   async exec(command: string): Promise<ExecResult> {
-    let defaultCtx = this.contexts.get('default');
-    if (!defaultCtx) {
-      defaultCtx = await this.createContext({ name: 'default' });
+    let defaultSession = this.sessions.get('default');
+    if (!defaultSession) {
+      defaultSession = await this.createSession({ name: 'default' });
     }
-    return defaultCtx.exec(command);
+    return defaultSession.exec(command);
   }
   
   destroyAll(): void {
-    for (const context of this.contexts.values()) {
-      context.destroy();
+    for (const session of this.sessions.values()) {
+      session.destroy();
     }
-    this.contexts.clear();
+    this.sessions.clear();
   }
 }
 

@@ -1,5 +1,5 @@
 # Use the sandbox base image
-FROM cloudflare/sandbox-test:0.2.3
+FROM cloudflare/sandbox-test:0.2.4
 
 # Install additional tools for testing
 RUN apt-get update && apt-get install -y \

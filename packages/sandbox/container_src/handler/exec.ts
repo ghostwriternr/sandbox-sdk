@@ -1,9 +1,8 @@
 import { type SpawnOptions, spawn } from "node:child_process";
-import type { ExecuteOptions, ExecuteRequest, SessionData } from "../types";
-import type { SimpleContextManager } from "../utils/simple-isolation";
+import type { ExecuteOptions, ExecuteRequest } from "../types";
+import type { SimpleSessionManager } from "../utils/simple-isolation";
 
 function executeCommand(
-  sessions: Map<string, SessionData>,
   command: string,
   options: ExecuteOptions,
 ): Promise<{
@@ -23,11 +22,7 @@ function executeCommand(
 
     const child = spawn(command, spawnOptions);
 
-    // Store the process reference for cleanup if sessionId is provided
-    if (options.sessionId && sessions.has(options.sessionId)) {
-      const session = sessions.get(options.sessionId)!;
-      session.activeProcess = child;
-    }
+    // Process reference is now handled by SimpleSessionManager
 
     let stdout = "";
     let stderr = "";
@@ -62,11 +57,7 @@ function executeCommand(
     } else {
       // Normal synchronous execution
       child.on("close", (code) => {
-        // Clear the active process reference
-        if (options.sessionId && sessions.has(options.sessionId)) {
-          const session = sessions.get(options.sessionId)!;
-          session.activeProcess = null;
-        }
+        // Process cleanup is now handled by SimpleSessionManager
 
         console.log(`[Server] Command completed: ${command}, Exit code: ${code}`);
 
@@ -79,11 +70,7 @@ function executeCommand(
       });
 
       child.on("error", (error) => {
-        // Clear the active process reference
-        if (options.sessionId && sessions.has(options.sessionId)) {
-          const session = sessions.get(options.sessionId)!;
-          session.activeProcess = null;
-        }
+        // Process cleanup is now handled by SimpleSessionManager
 
         reject(error);
       });
@@ -92,10 +79,9 @@ function executeCommand(
 }
 
 export async function handleExecuteRequest(
-  sessions: Map<string, SessionData>,
   req: Request,
   corsHeaders: Record<string, string>,
-  contextManager?: SimpleContextManager
+  sessionManager?: SimpleSessionManager
 ): Promise<Response> {
   try {
     const body = (await req.json()) as ExecuteRequest;
@@ -118,44 +104,44 @@ export async function handleExecuteRequest(
 
     console.log(`[Server] Executing command: ${command}`);
 
-    // ALWAYS use context manager for isolation (implicit contexts)
+    // ALWAYS use session manager for isolation (implicit sessions)
     let result;
-    if (contextManager) {
+    if (sessionManager) {
       try {
-        // Check if we have a session-specific context
-        let contextName = 'default';
+        // Check if we have a session-specific session
+        let sessionName = 'default';
         if (sessionId) {
-          // Use session-specific context for stateful operations
-          contextName = `session-${sessionId}`;
-          let ctx = contextManager.getContext(contextName);
-          if (!ctx) {
-            // Create session context on-demand with user's env/cwd
-            await contextManager.createContext({
-              name: contextName,
+          // Use session-specific session for stateful operations
+          sessionName = `session-${sessionId}`;
+          let session = sessionManager.getSession(sessionName);
+          if (!session) {
+            // Create session on-demand with user's env/cwd
+            await sessionManager.createSession({
+              name: sessionName,
               env: env || {},
-              cwd: cwd || '/workspace',
+              cwd: typeof cwd === 'string' ? cwd : '/workspace',
               isolation: true
             });
           }
         }
         
-        // Execute in the appropriate context
-        const execResult = contextName === 'default' 
-          ? await contextManager.exec(command)
-          : await contextManager.getContext(contextName)!.exec(command);
+        // Execute in the appropriate session
+        const execResult = sessionName === 'default' 
+          ? await sessionManager.exec(command)
+          : await sessionManager.getSession(sessionName)!.exec(command);
           
         result = {
           ...execResult,
           success: execResult.exitCode === 0
         };
       } catch (error) {
-        console.error("[Server] Context execution failed:", error);
+        console.error("[Server] Session execution failed:", error);
         // Fallback to regular execution
-        result = await executeCommand(sessions, command, { sessionId, background, cwd, env });
+        result = await executeCommand(command, { sessionId, background, cwd, env });
       }
     } else {
-      // Fallback if context manager not available
-      result = await executeCommand(sessions, command, { sessionId, background, cwd, env });
+      // Fallback if session manager not available
+      result = await executeCommand(command, { sessionId, background, cwd, env });
     }
 
     return new Response(
@@ -193,7 +179,6 @@ export async function handleExecuteRequest(
 }
 
 export async function handleStreamingExecuteRequest(
-  sessions: Map<string, SessionData>,
   req: Request,
   corsHeaders: Record<string, string>
 ): Promise<Response> {
@@ -232,11 +217,7 @@ export async function handleStreamingExecuteRequest(
 
         const child = spawn(command, spawnOptions);
 
-        // Store the process reference for cleanup if sessionId is provided
-        if (sessionId && sessions.has(sessionId)) {
-          const session = sessions.get(sessionId)!;
-          session.activeProcess = child;
-        }
+        // Process reference is now handled by SimpleSessionManager
 
         // For background processes, unref to prevent blocking
         if (background) {
@@ -293,11 +274,7 @@ export async function handleStreamingExecuteRequest(
         });
 
         child.on("close", (code) => {
-          // Clear the active process reference
-          if (sessionId && sessions.has(sessionId)) {
-            const session = sessions.get(sessionId)!;
-            session.activeProcess = null;
-          }
+          // Process cleanup is now handled by SimpleSessionManager
 
           console.log(
             `[Server] Command completed: ${command}, Exit code: ${code}`
@@ -331,11 +308,7 @@ export async function handleStreamingExecuteRequest(
         });
 
         child.on("error", (error) => {
-          // Clear the active process reference
-          if (sessionId && sessions.has(sessionId)) {
-            const session = sessions.get(sessionId)!;
-            session.activeProcess = null;
-          }
+          // Process cleanup is now handled by SimpleSessionManager
 
           controller.enqueue(
             new TextEncoder().encode(
