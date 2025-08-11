@@ -1,59 +1,5 @@
 import { type SpawnOptions, spawn } from "node:child_process";
 import type { ExecuteOptions, ExecuteRequest, SessionData } from "../types";
-import { execInNamespace, canCreateNamespaces } from "../utils/namespace";
-import type { ContextManager } from "../api/context";
-
-// Execute command with optional namespace isolation
-async function executeCommandWithIsolation(
-  command: string,
-  options: ExecuteOptions,
-  contextManager?: ContextManager
-): Promise<{
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}> {
-  // If we have a context manager, use the default context with isolation
-  if (contextManager) {
-    try {
-      const defaultContext = contextManager.getContext('default');
-      const result = await defaultContext.exec(command, {
-        env: options.env,
-        cwd: options.cwd
-      });
-      return {
-        success: result.exitCode === 0,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        exitCode: result.exitCode
-      };
-    } catch (error) {
-      console.error("[Server] Context execution failed, falling back to regular exec:", error);
-    }
-  }
-  
-  // Fallback to namespace isolation if available
-  if (canCreateNamespaces()) {
-    try {
-      const result = await execInNamespace(command, {
-        env: options.env,
-        cwd: options.cwd
-      });
-      return {
-        success: result.exitCode === 0,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        exitCode: result.exitCode
-      };
-    } catch (error) {
-      console.error("[Server] Namespace isolation failed, falling back to regular exec:", error);
-    }
-  }
-  
-  // Fallback to regular execution
-  return executeCommand(new Map(), command, options);
-}
 
 function executeCommand(
   sessions: Map<string, SessionData>,
@@ -147,8 +93,7 @@ function executeCommand(
 export async function handleExecuteRequest(
   sessions: Map<string, SessionData>,
   req: Request,
-  corsHeaders: Record<string, string>,
-  contextManager?: ContextManager
+  corsHeaders: Record<string, string>
 ): Promise<Response> {
   try {
     const body = (await req.json()) as ExecuteRequest;
@@ -171,10 +116,7 @@ export async function handleExecuteRequest(
 
     console.log(`[Server] Executing command: ${command}`);
 
-    // Use isolation if context manager is available
-    const result = contextManager 
-      ? await executeCommandWithIsolation(command, { sessionId, background, cwd, env }, contextManager)
-      : await executeCommand(sessions, command, { sessionId, background, cwd, env });
+    const result = await executeCommand(sessions, command, { sessionId, background, cwd, env });
 
     return new Response(
       JSON.stringify({
