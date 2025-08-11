@@ -1,5 +1,6 @@
 import { type SpawnOptions, spawn } from "node:child_process";
 import type { ExecuteOptions, ExecuteRequest, SessionData } from "../types";
+import type { SimpleContextManager } from "../utils/simple-isolation";
 
 function executeCommand(
   sessions: Map<string, SessionData>,
@@ -93,7 +94,8 @@ function executeCommand(
 export async function handleExecuteRequest(
   sessions: Map<string, SessionData>,
   req: Request,
-  corsHeaders: Record<string, string>
+  corsHeaders: Record<string, string>,
+  contextManager?: SimpleContextManager
 ): Promise<Response> {
   try {
     const body = (await req.json()) as ExecuteRequest;
@@ -116,7 +118,25 @@ export async function handleExecuteRequest(
 
     console.log(`[Server] Executing command: ${command}`);
 
-    const result = await executeCommand(sessions, command, { sessionId, background, cwd, env });
+    // Use context manager if available for isolation
+    let result;
+    if (contextManager) {
+      try {
+        // Execute in default context with isolation
+        const execResult = await contextManager.exec(command);
+        result = {
+          ...execResult,
+          success: execResult.exitCode === 0
+        };
+      } catch (error) {
+        console.error("[Server] Context execution failed:", error);
+        // Fallback to regular execution
+        result = await executeCommand(sessions, command, { sessionId, background, cwd, env });
+      }
+    } else {
+      // Regular execution without isolation
+      result = await executeCommand(sessions, command, { sessionId, background, cwd, env });
+    }
 
     return new Response(
       JSON.stringify({

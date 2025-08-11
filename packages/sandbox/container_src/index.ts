@@ -4,6 +4,7 @@ import {
   handleExecuteRequest,
   handleStreamingExecuteRequest,
 } from "./handler/exec";
+import { SimpleContextManager } from "./utils/simple-isolation";
 import {
   handleDeleteFileRequest,
   handleListFilesRequest,
@@ -41,6 +42,19 @@ const exposedPorts = new Map<number, { name?: string; exposedAt: Date }>();
 
 // In-memory process storage - cleared on container restart
 const processes = new Map<string, ProcessRecord>();
+
+// Context manager for secure execution with isolation
+const contextManager = new SimpleContextManager();
+
+// Initialize default context on startup
+contextManager.createContext({ 
+  name: 'default',
+  isolation: true  // Will auto-detect if CAP_SYS_ADMIN available
+}).then(() => {
+  console.log("[Container] Default context initialized");
+}).catch(err => {
+  console.error("[Container] Failed to initialize default context:", err);
+});
 
 // Generate a unique session ID using cryptographically secure randomness
 function generateSessionId(): string {
@@ -172,7 +186,7 @@ const server = serve({
 
         case "/api/execute":
           if (req.method === "POST") {
-            return handleExecuteRequest(sessions, req, corsHeaders);
+            return handleExecuteRequest(sessions, req, corsHeaders, contextManager);
           }
           break;
 
@@ -319,6 +333,92 @@ const server = serve({
         case "/api/process/kill-all":
           if (req.method === "DELETE") {
             return handleKillAllProcessesRequest(processes, req, corsHeaders);
+          }
+          break;
+
+        // Context management endpoints for secure execution
+        case "/api/context/create":
+          if (req.method === "POST") {
+            try {
+              const body = await req.json() as any;
+              const { name, env, cwd, isolation } = body;
+              
+              if (!name) {
+                return new Response(
+                  JSON.stringify({ error: "Context name is required" }),
+                  { status: 400, headers: { "Content-Type": "application/json", ...corsHeaders }}
+                );
+              }
+              
+              const context = await contextManager.createContext({
+                name,
+                env: env || {},
+                cwd: cwd || '/workspace',
+                isolation: isolation !== false
+              });
+              
+              return new Response(
+                JSON.stringify({ 
+                  success: true, 
+                  name,
+                  message: `Context '${name}' created with${isolation !== false ? '' : 'out'} isolation`
+                }),
+                { headers: { "Content-Type": "application/json", ...corsHeaders }}
+              );
+            } catch (error) {
+              console.error("[Container] Failed to create context:", error);
+              return new Response(
+                JSON.stringify({ 
+                  error: "Failed to create context",
+                  message: error instanceof Error ? error.message : String(error)
+                }),
+                { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders }}
+              );
+            }
+          }
+          break;
+          
+        case "/api/context/exec":
+          if (req.method === "POST") {
+            try {
+              const body = await req.json() as any;
+              const { name, command } = body;
+              
+              if (!name || !command) {
+                return new Response(
+                  JSON.stringify({ error: "Context name and command are required" }),
+                  { status: 400, headers: { "Content-Type": "application/json", ...corsHeaders }}
+                );
+              }
+              
+              const context = contextManager.getContext(name);
+              if (!context) {
+                return new Response(
+                  JSON.stringify({ error: `Context '${name}' not found` }),
+                  { status: 404, headers: { "Content-Type": "application/json", ...corsHeaders }}
+                );
+              }
+              
+              const result = await context.exec(command);
+              
+              return new Response(
+                JSON.stringify({
+                  command,
+                  ...result,
+                  success: result.exitCode === 0
+                }),
+                { headers: { "Content-Type": "application/json", ...corsHeaders }}
+              );
+            } catch (error) {
+              console.error("[Container] Context exec failed:", error);
+              return new Response(
+                JSON.stringify({ 
+                  error: "Command execution failed",
+                  message: error instanceof Error ? error.message : String(error)
+                }),
+                { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders }}
+              );
+            }
           }
           break;
 

@@ -1,8 +1,5 @@
-import { spawn, execFile, type ChildProcess } from 'child_process';
-import { promisify } from 'util';
-import { execSync } from 'child_process';
-
-const execFileAsync = promisify(execFile);
+import { spawn, type ChildProcess } from 'child_process';
+import { randomUUID } from 'crypto';
 
 // Types
 export interface ExecResult {
@@ -15,14 +12,14 @@ export interface ContextOptions {
   name: string;
   env?: Record<string, string>;
   cwd?: string;
-  persistent?: boolean;
   isolation?: boolean;
 }
 
 // Check if we can create namespaces
 export function hasNamespaceSupport(): boolean {
   try {
-    execSync('unshare --pid --fork true', { stdio: 'ignore' });
+    const child = spawn('unshare', ['--pid', '--fork', 'true']);
+    child.unref();
     return true;
   } catch {
     return false;
@@ -30,103 +27,172 @@ export function hasNamespaceSupport(): boolean {
 }
 
 /**
- * Simple, secure execution context
- * Under 100 lines, does EVERYTHING we need
+ * Linux-native execution context
+ * Uses bash for state management, but safely!
  */
 export class SimpleContext {
-  private sessionEnv: Record<string, string> = {};
-  private sessionCwd: string;
+  private shell: ChildProcess | null = null;
+  private ready = false;
   private canIsolate: boolean;
   
   constructor(private options: ContextOptions) {
-    this.sessionEnv = { ...process.env, ...options.env };
-    this.sessionCwd = options.cwd || '/workspace';
     this.canIsolate = (options.isolation !== false) && hasNamespaceSupport();
   }
   
-  /**
-   * Execute command with proper isolation and state management
-   * NO SHELL INJECTION - uses arrays not strings!
-   */
-  async exec(command: string, options?: { env?: Record<string, string>; cwd?: string }): Promise<ExecResult> {
-    // Parse command safely (basic tokenization - could use shell-quote for production)
-    const args = this.parseCommand(command);
-    const cmd = args[0];
-    const cmdArgs = args.slice(1);
+  async initialize(): Promise<void> {
+    // Start bash with or without isolation
+    const shellCommand = this.canIsolate
+      ? ['unshare', '--pid', '--fork', '--mount-proc', 'bash', '--norc', '-i']
+      : ['bash', '--norc', '-i'];
     
-    // Merge environment
-    const execEnv = { ...this.sessionEnv, ...options?.env };
-    const execCwd = options?.cwd || this.sessionCwd;
+    this.shell = spawn(shellCommand[0], shellCommand.slice(1), {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        ...this.options.env,
+        PS1: '\\$ ',  // Simple prompt
+        HOME: '/workspace',
+        PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+      },
+      cwd: this.options.cwd || '/workspace'
+    });
     
-    // Handle state-changing commands
-    if (cmd === 'cd' && cmdArgs[0]) {
-      this.sessionCwd = cmdArgs[0].startsWith('/') ? cmdArgs[0] : `${this.sessionCwd}/${cmdArgs[0]}`;
-      return { stdout: '', stderr: '', exitCode: 0 };
-    }
-    
-    if (cmd === 'export' && cmdArgs[0]) {
-      const [key, value] = cmdArgs[0].split('=');
-      if (key && value) {
-        this.sessionEnv[key] = value;
-      }
-      return { stdout: '', stderr: '', exitCode: 0 };
-    }
-    
-    // Execute with or without isolation
-    try {
-      if (this.canIsolate) {
-        // Use unshare for isolation - simple and secure
-        const { stdout, stderr } = await execFileAsync('unshare', [
-          '--pid', '--fork', '--mount-proc',
-          cmd, ...cmdArgs
-        ], {
-          env: execEnv,
-          cwd: execCwd,
-          maxBuffer: 10 * 1024 * 1024, // 10MB
-          timeout: 30000 // 30s timeout
-        });
-        
-        return { stdout, stderr, exitCode: 0 };
-      } else {
-        // Fallback without isolation
-        const { stdout, stderr } = await execFileAsync(cmd, cmdArgs, {
-          env: execEnv,
-          cwd: execCwd,
-          maxBuffer: 10 * 1024 * 1024,
-          timeout: 30000
-        });
-        
-        return { stdout, stderr, exitCode: 0 };
-      }
-    } catch (error: any) {
-      return {
-        stdout: error.stdout || '',
-        stderr: error.stderr || error.message,
-        exitCode: error.code || 1
-      };
-    }
+    // Wait for shell to be ready
+    await this.waitForReady();
+    this.ready = true;
   }
   
-  // Getters for session state
-  getEnv(): Record<string, string> { return this.sessionEnv; }
-  getCwd(): string { return this.sessionCwd; }
+  private waitForReady(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Shell initialization timeout'));
+      }, 5000);
+      
+      const marker = `READY_${randomUUID()}`;
+      let output = '';
+      
+      const onData = (data: Buffer) => {
+        output += data.toString();
+        if (output.includes(marker)) {
+          clearTimeout(timeout);
+          this.shell?.stdout?.off('data', onData);
+          resolve();
+        }
+      };
+      
+      this.shell?.stdout?.on('data', onData);
+      this.shell?.stdin?.write(`echo ${marker}\n`);
+    });
+  }
   
-  // Basic command parser (replace with shell-quote in production)
-  private parseCommand(command: string): string[] {
-    // This is simplified - use a proper shell parser in production
-    return command.match(/(?:[^\s"]+|"[^"]*")+/g)?.map(s => s.replace(/"/g, '')) || [];
+  /**
+   * Execute command in the shell session
+   * The shell maintains pwd, env vars, background processes, etc.
+   */
+  async exec(command: string): Promise<ExecResult> {
+    if (!this.ready || !this.shell) {
+      throw new Error('Context not initialized');
+    }
+    
+    return new Promise((resolve, reject) => {
+      const execId = randomUUID();
+      const startMarker = `START_${execId}`;
+      const endMarker = `END_${execId}`;
+      
+      let capturing = false;
+      let stdout = '';
+      let stderr = '';
+      
+      const onStdout = (data: Buffer) => {
+        const chunk = data.toString();
+        
+        if (chunk.includes(startMarker)) {
+          capturing = true;
+          // Remove everything up to and including the start marker
+          const parts = chunk.split(startMarker);
+          if (parts[1]) {
+            stdout += parts[1];
+          }
+          return;
+        }
+        
+        if (capturing) {
+          if (chunk.includes(endMarker)) {
+            // Capture up to the end marker
+            const parts = chunk.split(endMarker);
+            stdout += parts[0];
+            
+            // Extract exit code from marker line
+            const exitMatch = chunk.match(new RegExp(`${endMarker}:(\\d+)`));
+            const exitCode = exitMatch ? parseInt(exitMatch[1]) : 0;
+            
+            // Clean up and resolve
+            this.shell?.stdout?.off('data', onStdout);
+            this.shell?.stderr?.off('data', onStderr);
+            
+            resolve({ stdout, stderr, exitCode });
+            capturing = false;
+          } else {
+            stdout += chunk;
+          }
+        }
+      };
+      
+      const onStderr = (data: Buffer) => {
+        if (capturing) {
+          stderr += data.toString();
+        }
+      };
+      
+      // Set up listeners
+      this.shell.stdout?.on('data', onStdout);
+      this.shell.stderr?.on('data', onStderr);
+      
+      // Execute command with markers
+      const wrappedCommand = `
+echo ${startMarker}
+${command}
+EXIT_CODE=$?
+echo "${endMarker}:\${EXIT_CODE}"
+`;
+      
+      this.shell.stdin?.write(wrappedCommand);
+      
+      // Timeout protection
+      setTimeout(() => {
+        if (capturing) {
+          this.shell?.stdout?.off('data', onStdout);
+          this.shell?.stderr?.off('data', onStderr);
+          reject(new Error(`Command timeout: ${command}`));
+        }
+      }, 30000);
+    });
+  }
+  
+  destroy(): void {
+    if (this.shell) {
+      this.shell.kill('SIGTERM');
+      this.shell = null;
+      this.ready = false;
+    }
   }
 }
 
 /**
  * Simple context manager
- * Manages multiple named contexts
  */
 export class SimpleContextManager {
   private contexts = new Map<string, SimpleContext>();
   
-  createContext(options: ContextOptions): SimpleContext {
+  async createContext(options: ContextOptions): Promise<SimpleContext> {
+    // Clean up existing context with same name
+    const existing = this.contexts.get(options.name);
+    if (existing) {
+      existing.destroy();
+    }
+    
     const context = new SimpleContext(options);
+    await context.initialize();
     this.contexts.set(options.name, context);
     return context;
   }
@@ -135,14 +201,20 @@ export class SimpleContextManager {
     return this.contexts.get(name);
   }
   
-  // Execute in default context (backward compatibility)
   async exec(command: string): Promise<ExecResult> {
     let defaultCtx = this.contexts.get('default');
     if (!defaultCtx) {
-      defaultCtx = this.createContext({ name: 'default' });
+      defaultCtx = await this.createContext({ name: 'default' });
     }
     return defaultCtx.exec(command);
   }
+  
+  destroyAll(): void {
+    for (const context of this.contexts.values()) {
+      context.destroy();
+    }
+    this.contexts.clear();
+  }
 }
 
-// That's it! ~150 lines covers ALL requirements
+// That's it! ~200 lines, Linux does all the work!

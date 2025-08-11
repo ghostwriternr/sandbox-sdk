@@ -785,4 +785,52 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
   async deleteCodeContext(contextId: string): Promise<void> {
     return this.codeInterpreter.deleteCodeContext(contextId);
   }
+
+  // ============================================================================
+  // Secure Context Management (Simple Isolation)
+  // ============================================================================
+
+  /**
+   * Create a new execution context with isolation
+   */
+  async createContext(options: {
+    name: string;
+    env?: Record<string, string>;
+    cwd?: string;
+    isolation?: boolean;
+  }): Promise<{ success: boolean; name: string; message: string }> {
+    const response = await this.request("/api/context/create", {
+      method: "POST",
+      body: JSON.stringify(options)
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || "Failed to create context");
+    }
+
+    return response.json();
+  }
+
+  /**
+   * Execute a command in a specific context
+   */
+  async execInContext(name: string, command: string): Promise<{
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+    success: boolean;
+  }> {
+    const response = await this.request("/api/context/exec", {
+      method: "POST",
+      body: JSON.stringify({ name, command })
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || "Failed to execute command");
+    }
+
+    return response.json();
+  }
 }
