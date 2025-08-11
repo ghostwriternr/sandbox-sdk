@@ -152,23 +152,25 @@ Our three issues pass all tests:
 - **Port Hijacking**: ✓ Breaks API, ✓ Can't reclaim port, ✓ Common port conflicts, ✓ Downtime
 - **Credentials**: ✓ Breaks security, ✓ Can't revoke access, ✓ Logging accidents, ✓ Financial loss
 
-## Solution: Context-Based Architecture with Universal Routing
+## Solution: Simplified Control Plane Protection
 
-After extensive analysis, we've discovered a critical insight that simplifies everything:
+### Important Context: We're Already Isolated!
 
-### Key Discovery: AI Agents Never Need Platform Commands
+We're running inside:
+- **Firecracker VM** (hardware isolation from Cloudflare)
+- **Docker Container** (namespace isolation from container runtime)
 
-**The breakthrough**: AI agents (Claude, Gemini, etc.) NEVER need to execute commands in platform context. They need platform credentials to authenticate, but ALL subprocess execution can route to user context.
+**We only need lightweight control plane protection WITHIN the container.**
 
-This means:
-- No pattern matching needed (no detecting 'wrangler', 'aws', etc.)
-- No complex routing logic
-- Complete isolation by default
-- Simple, reliable implementation
+### The Simplified Solution
 
-### The Context-Based Solution
+After extensive analysis, we've dramatically simplified our approach:
 
-We use **Execution Contexts** - isolated environments with their own credentials, state, and routing rules:
+1. **Hide Control Plane**: Simple `unshare --pid` to make Bun/Jupyter invisible
+2. **Context-Based Credentials**: Separate contexts for platform vs user credentials
+3. **Universal Routing**: LD_PRELOAD to route ALL AI children to user context
+
+No complex namespace management needed - we leverage existing container isolation.
 
 ```typescript
 // Platform context for AI agent
@@ -509,35 +511,40 @@ char* getenv(const char* name) {
 
 ## Implementation Approach
 
-### Why Not Use Existing Tools?
+### Why We Don't Need Complex Sandboxing
 
-We researched existing sandboxing solutions (Bubblewrap, gVisor, Firejail, etc.) and found:
-- **They solve general sandboxing** - We only need control plane protection
-- **They don't handle credential routing** - None route AI children to different contexts
-- **We're already sandboxed** - Firecracker+Docker provides strong isolation
-- **Our LD_PRELOAD approach is simpler** - One mechanism solves both problems
+We researched existing sandboxing solutions (Bubblewrap, gVisor, Firejail, etc.) and realized:
+- **We're already strongly isolated** - Firecracker VM + Docker container
+- **We only need control plane protection** - Hide Bun/Jupyter from user code
+- **Credential routing is unique to us** - LD_PRELOAD universal routing
+- **Simplicity wins** - One `unshare` command + contexts + LD_PRELOAD
 
-### Our Simplified Implementation
+### Our Minimal Implementation
 
-#### Phase 1: Control Plane Protection (Day 1)
+#### What We Need (Environment-Aware)
+
+1. **Hide Control Plane** (production only):
 ```bash
-# Hide control plane with one command at startup
+# PRODUCTION: Make Bun/Jupyter invisible
 unshare --pid --fork --mount-proc sh -c '
   bun serve --port 8080 &
   jupyter kernel --port 8888 &
   sleep infinity
 '
+
+# LOCAL DEV: Graceful fallback (visible but functional)
+# Control plane remains visible - avoid pkill commands
 ```
 
-#### Phase 2: Universal Routing (Day 2-3)
-- Build LD_PRELOAD interceptor
-- Route ALL AI children to user context
-- No pattern matching needed
+2. **Context Management** (works in both environments):
+- Platform context: Has ANTHROPIC_API_KEY
+- User context: Has CLOUDFLARE_API_TOKEN, AWS_KEY
+- Credential isolation via contexts (not global env)
 
-#### Phase 3: Integration (Day 4-5)
-- Test with real AI agents
-- Verify credential isolation
-- Confirm control plane invisible
+3. **Universal Routing** (LD_PRELOAD - both environments):
+- Route ALL AI agent children to user context
+- No pattern matching - everything routes
+- Works regardless of control plane visibility
 
 ## Security Checklist
 
@@ -932,24 +939,27 @@ Leveraging our control of the bun server, we can implement:
 - Filter process lists
 - Separate process groups
 
-## Production Environment Capabilities Testing
+## Production vs Local Development Capabilities
 
-### Testing Methodology
-We deployed a comprehensive security testing worker to both local and production environments to determine actual Linux capabilities available in Cloudflare Containers.
+### Critical Discovery from Testing
+We deployed comprehensive tests and discovered **production has everything we need**, while local development is intentionally restricted for developer safety.
 
-### Test Results Summary
+### Capability Comparison
 
-| Feature | Local Environment | Production Environment | Impact |
-|---------|------------------|------------------------|--------|
-| **CAP_SYS_ADMIN** | ❌ Not Available | ✅ **Available** | Can create namespaces for isolation |
-| **PID Namespace** | ❌ Not Available | ✅ **Available** | Can hide processes from user code |
-| **Mount Namespace** | ❌ Not Available | ✅ **Available** | Can isolate filesystems |
-| **Network Namespace** | ❌ Not Available | ✅ **Available** | Can isolate network access |
-| **User Namespace** | ❌ Not Available | ✅ **Available** | Can map different user permissions |
-| **Cgroup Delegation** | ❌ Not Available | ✅ **Available** | Can create isolated resource groups |
-| **CAP_SYS_PTRACE** | ❌ Not Available | ✅ **Available** | Can debug and trace processes |
-| **Seccomp Mode** | 2 (Filtered) | 0 (Disabled) | No syscall filtering in production |
-| **Environment Exposure** | ⚠️ Exposed | ⚠️ Exposed | Current implementation exposes all secrets |
+| Feature | Local Development | Production | Impact |
+|---------|------------------|------------|--------|
+| **CAP_SYS_ADMIN** | ❌ Not Available | ✅ **Available** | Production can hide control plane |
+| **unshare command** | ❌ Fails | ✅ **Works** | Control plane hiding via PID namespace |
+| **Process visibility** | ⚠️ All visible | ✅ Can be hidden | pkill protection in production |
+| **Cgroup delegation** | ❌ Disabled | ✅ **Enabled** | Resource isolation possible |
+| **Seccomp** | Mode 2 (Filtered) | Mode 0 (Disabled) | Fewer restrictions in production |
+| **Context isolation** | ✅ Works | ✅ Works | Credential separation in both |
+| **LD_PRELOAD routing** | ✅ Works | ✅ Works | Universal routing in both |
+
+### What This Means
+- **Production**: Full security - hidden control plane + contexts + routing
+- **Local Dev**: Partial security - visible control plane but contexts still work
+- **Both**: Credential isolation via contexts, universal routing via LD_PRELOAD
 
 ### Production Capabilities (Raw Output)
 ```

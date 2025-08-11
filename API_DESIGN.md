@@ -186,125 +186,127 @@ This means:
 - ALL child processes automatically route
 - Complete transparency to AI agents
 
-### The Magic: Automatic Namespace Selection
+### Implementation: Simplified Control Plane + Contexts
 
 ```typescript
 class ContainerServer {
-  private namespaces = {
-    control: null,  // Created once, hidden forever
-    user: null,     // Created once, reused for all regular exec
-    secure: null    // Created once, reused for all secure exec
-  };
+  private contexts = new Map<string, Context>();
   
   async initialize() {
-    // Create all three namespaces at container startup
-    this.namespaces.control = await this.createNamespace({ hidden: true });
-    this.namespaces.user = await this.createNamespace({ shared: true });
-    this.namespaces.secure = await this.createNamespace({ isolated: true });
+    // Step 1: Hide control plane with simple unshare (one command!)
+    spawn('unshare', [
+      '--pid', '--fork', '--mount-proc',
+      'sh', '-c', `
+        bun serve --port 8080 &
+        jupyter kernel --port 8888 &
+        sleep infinity
+      `
+    ]);
     
-    // Start control plane in its namespace
-    await this.namespaces.control.exec('bun serve --port 8080');
-    await this.namespaces.control.exec('jupyter kernel --port 8888');
+    // Step 2: Set up LD_PRELOAD router for credential isolation
+    await this.setupUniversalRouter();
+    
+    // Step 3: Contexts handle credential separation
+    // User creates contexts as needed with different credentials
   }
   
-  async exec(command: string, options?: ExecOptions) {
-    // Smart namespace selection
-    if (options?.env && Object.keys(options.env).length > 0) {
-      // Has credentials? Use secure namespace
-      return this.namespaces.secure.exec(command, {
-        ...options,
-        env: { PATH: '/usr/bin:/bin', ...options.env }
-      });
-    } else {
-      // No credentials? Use shared user namespace
-      return this.namespaces.user.exec(command, options);
+  async createContext(options: ContextOptions): Promise<Context> {
+    const context = new Context(options);
+    
+    // If childContext specified, enable universal routing
+    if (options.childContext) {
+      context.env.LD_PRELOAD = '/lib/universal_router.so';
+      context.env.SANDBOX_ROUTE_TO_CONTEXT = options.childContext;
     }
+    
+    this.contexts.set(options.name, context);
+    return context;
   }
 }
 ```
 
 ### What This Means for Users
 
-| Command | Namespace Used | Can See | Has Access To |
-|---------|---------------|---------|---------------|
-| `exec("ls")` | User | Other user processes | No credentials |
-| `exec("ps aux")` | User | Other user processes | No credentials |
-| `exec("npm install")` | User | Other user processes | No credentials |
-| `exec("aws deploy", {env: {AWS_KEY}})` | Secure | Only its own process | AWS_KEY only |
-| `exec("node app.js")` | User | Other user processes | No credentials |
+| Component | Purpose | Visibility |
+|-----------|---------|------------|
+| Control Plane | Bun + Jupyter servers | Hidden via PID namespace |
+| Platform Context | AI agents (Claude, etc.) | Has platform credentials |
+| User Context | Deployment commands | Has user credentials |
+| LD_PRELOAD | Routes ALL AI children to user context | Transparent |
 
 ## Implementation Details
 
-### Startup Sequence
+### Startup Sequence (Environment-Aware)
 
 ```typescript
-// Container startup (happens once)
+// Container startup - detects environment and adapts
 async function initializeContainer() {
-  // Step 1: Pre-bind critical ports
-  const bunServer = Bun.serve({ port: 8080 });
+  const capabilities = await detectCapabilities();
   
-  // Step 2: Create three persistent namespaces
-  const controlNS = await createNamespace('control', { hidden: true });
-  const userNS = await createNamespace('user', { shared: true });
-  const secureNS = await createNamespace('secure', { isolated: true });
+  if (capabilities.hasNamespaces) {
+    // PRODUCTION: Hide control plane (one command)
+    spawn('unshare', [
+      '--pid', '--fork', '--mount-proc',
+      'sh', '-c', 'bun serve --port 8080 & jupyter kernel --port 8888 & sleep infinity'
+    ]);
+    console.log('✅ Production: Control plane hidden');
+  } else {
+    // LOCAL DEV: Start normally (visible but functional)
+    spawn('bun', ['serve', '--port', '8080'], { detached: true });
+    spawn('jupyter', ['kernel', '--port', '8888'], { detached: true });
+    console.warn('⚠️ Local dev: Control plane visible');
+  }
   
-  // Step 3: Start Jupyter in control namespace
-  await controlNS.exec('jupyter kernel --port 8888');
+  // Step 2: Set up routing (works in both environments)
+  await compileUniversalRouter();
+  await startRoutingDaemon();
   
-  // Ready to accept commands!
+  console.log(`Ready in ${capabilities.mode} mode`);
 }
 ```
 
-### How exec() Routes Commands
+### How Universal Routing Works
 
 ```typescript
-async function exec(command: string, options?: ExecOptions) {
-  // Decision tree for namespace selection
-  if (options?.env && Object.keys(options.env).length > 0) {
-    // Has environment variables → Secure namespace
-    return await secureNS.exec(command, {
-      env: { 
-        PATH: process.env.PATH,  // Preserve PATH
-        HOME: '/workspace',       // Standard HOME
-        ...options.env           // User-provided secrets
-      },
-      clearEnvAfter: true  // Clean up after execution
-    });
-  } else {
-    // No environment variables → User namespace  
-    return await userNS.exec(command, options);
+// No complex routing logic needed!
+class Context {
+  async exec(command: string, options?: ExecOptions) {
+    // If this context has childContext set, ALL children route there
+    if (this.childContext && isAIAgent(command)) {
+      // Enable LD_PRELOAD routing
+      const env = {
+        ...this.env,
+        LD_PRELOAD: '/lib/universal_router.so',
+        SANDBOX_ROUTE_TO_CONTEXT: this.childContext
+      };
+      return spawn(command, { ...options, env });
+    }
+    
+    // Normal execution
+    return spawn(command, { ...options, env: this.env });
   }
 }
 ```
 
-### Namespace Implementation (Linux)
+### Control Plane Isolation (Simplified)
 
 ```typescript
-// Creating reusable namespaces
-function createNamespace(name: string, opts: NamespaceOptions) {
-  // Create namespace and keep it alive
-  const proc = spawn('unshare', [
-    '--pid',      // Separate process tree
-    '--mount',    // Separate mount points
-    '--fork',     // Fork before exec
-    'sh', '-c', 'sleep infinity'  // Keep namespace alive
+// We only need ONE namespace - to hide control plane
+function hideControlPlane() {
+  // That's it! One command to hide Bun + Jupyter
+  spawn('unshare', [
+    '--pid',           // Hide processes
+    '--fork',          // Fork before exec
+    '--mount-proc',    // Separate /proc
+    'sh', '-c', `
+      bun serve --port 8080 &
+      jupyter kernel --port 8888 &
+      sleep infinity   # Keep namespace alive
+    `
   ]);
   
-  const nsPath = `/proc/${proc.pid}/ns/pid`;
-  
-  return {
-    // Execute commands in this namespace
-    exec: async (cmd: string, options?: {}) => {
-      return spawn('nsenter', [
-        `--pid=${nsPath}`,  // Enter the namespace
-        '--', 
-        'sh', '-c', cmd
-      ], options);
-    },
-    
-    // Namespace persists until container shutdown
-    destroy: () => proc.kill()
-  };
+  // Control plane now invisible to user code
+  // No complex namespace management needed!
 }
 ```
 
@@ -432,7 +434,11 @@ await sandbox.context("default").exec("ls");
 A: Only if you're using `setEnvVars()` for secrets. Move them to `exec(cmd, {env})` instead.
 
 **Q: What if I'm running locally without CAP_SYS_ADMIN?**
-A: The SDK falls back gracefully - you get a warning but everything still works.
+A: The SDK falls back gracefully:
+- Control plane remains visible (can't use `unshare`)
+- Context-based credential isolation still works
+- LD_PRELOAD routing still functions
+- You get a warning to avoid `pkill` commands
 
 **Q: Can processes see each other?**
 A: Yes! Regular commands in the user namespace can see each other (for debugging). Only secure commands are isolated.
@@ -441,10 +447,13 @@ A: Yes! Regular commands in the user namespace can see each other (for debugging
 A: Still works for non-secrets like NODE_ENV, PORT, etc. Just don't use it for credentials.
 
 **Q: Performance impact?**
-A: Near zero. Namespaces are created once at startup, not per command.
+A: Minimal overhead:
+- Production: ~15ms startup (one `unshare` command)
+- Local dev: ~5ms startup (no hiding needed)
+- Per-exec: ~2-3ms with context + routing
 
 **Q: Can I debug my processes?**
 A: Yes! `ps aux`, `htop`, etc. work normally in the user namespace.
 
-**Q: How does the SDK know what's a credential?**
-A: It doesn't! It just isolates any command that has the `env` option.
+**Q: How does credential isolation work?**
+A: Contexts with different credentials + LD_PRELOAD universal routing. AI agents in platform context have ALL their children routed to user context automatically.

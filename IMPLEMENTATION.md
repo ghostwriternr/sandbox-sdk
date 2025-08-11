@@ -15,10 +15,13 @@ Everything else is deferred as nice-to-have.
 Cloudflare Infrastructure
 └── Firecracker VM (hardware isolation)
     └── Docker Container (namespace isolation)
-        └── Our Sandbox (need to isolate WITHIN container)
+        └── Our Sandbox (minimal isolation needed WITHIN container)
 ```
 
-We're already inside strong isolation layers. We only need to protect our control plane from user code.
+**Critical Insight**: We're already inside strong isolation (Firecracker+Docker). We only need to:
+1. Hide control plane (Bun/Jupyter) from user code
+2. Separate credentials via contexts
+3. Route AI agent children to user context
 
 ### Current State (Vulnerable)
 ```
@@ -28,7 +31,7 @@ Docker Container
 └── Ports can be hijacked (8080, 8888)
 ```
 
-### Target State (Simplified)
+### Target State (Simplified - What We're Building)
 ```
 Docker Container
 ├── Control Plane (Hidden via simple unshare --pid)
@@ -37,77 +40,76 @@ Docker Container
 │
 └── User Space (Default namespace)
     ├── Platform Context (AI agents run here)
-    │   └── LD_PRELOAD universal routing
+    │   ├── Has ANTHROPIC_API_KEY
+    │   └── LD_PRELOAD routes ALL children to user context
     └── User Context (AI children run here)
-        └── Has deployment credentials
+        ├── Has CLOUDFLARE_API_TOKEN, AWS_KEY
+        └── Never sees platform credentials
 ```
 
-**Key Insight**: We don't need complex isolation - we're already inside Firecracker+Docker! Just hide the control plane and route credentials.
+**Implementation**: One `unshare` command + contexts + LD_PRELOAD = Complete isolation
 
 ## Implementation Details
 
-### Phase 1: Simplified Container Startup
+### Phase 1: Minimal Container Startup (Environment-Aware)
 
 ```typescript
 // container_src/index.ts
 class ContainerServer {
   private contexts: Map<string, ExecutionContext> = new Map();
   private controlPlanePid: number;
+  private capabilities: { hasNamespaces: boolean; mode: 'production' | 'development' };
   
   async initialize() {
-    // Step 1: Start control plane in hidden PID namespace (simple!)
-    const control = spawn('unshare', [
-      '--pid',           // Hide from ps/pkill
-      '--fork',          // Fork before exec
-      '--mount-proc',    // Separate /proc
-      'sh', '-c', `
-        # Pre-bind ports and start services
-        bun serve --port 8080 &
-        jupyter kernel --port 8888 &
-        sleep infinity  # Keep namespace alive
-      `
-    ]);
-    this.controlPlanePid = control.pid;
+    // Step 0: Detect environment capabilities
+    this.capabilities = await this.detectCapabilities();
     
-    // Step 2: Initialize LD_PRELOAD router
+    // Step 1: Hide control plane (production only)
+    if (this.capabilities.hasNamespaces) {
+      // PRODUCTION: Full isolation available
+      const control = spawn('unshare', [
+        '--pid',           // Hide from ps/pkill
+        '--fork',          // Fork before exec
+        '--mount-proc',    // Separate /proc
+        'sh', '-c', `
+          # Start services hidden from user code
+          bun serve --port 8080 &
+          jupyter kernel --port 8888 &
+          sleep infinity  # Keep namespace alive
+        `
+      ]);
+      this.controlPlanePid = control.pid;
+      console.log('✅ Production: Control plane hidden via unshare');
+    } else {
+      // LOCAL DEV: Graceful fallback
+      console.warn(
+        '⚠️ Local Development Mode\n' +
+        '   - Control plane remains visible (no CAP_SYS_ADMIN)\n' +
+        '   - Avoid using pkill/killall commands\n' +
+        '   - Context isolation still works for credentials'
+      );
+      // Start services normally (visible but functional)
+      spawn('bun', ['serve', '--port', '8080'], { detached: true });
+      spawn('jupyter', ['kernel', '--port', '8888'], { detached: true });
+    }
+    
+    // Step 2: Set up universal routing (works in both environments)
     await this.compileUniversalRouter();
     await this.startRoutingDaemon();
     
-    // Step 3: Create default contexts for user code
-    await this.createContext({ name: 'platform' });
-    await this.createContext({ name: 'user' });
-    
-    console.log('Control plane hidden, router ready');
+    console.log(`Ready in ${this.capabilities.mode} mode`);
   }
   
-  private async createNamespaces() {
-    // Create control namespace (hidden from user)
-    const control = await this.createNamespace({
-      name: 'control',
-      pid: true,   // Separate PID namespace
-      mount: true, // Separate /proc
-      net: false   // Share network (needs ports)
-    });
-    
-    // Create user namespace (shared for debugging)
-    const user = await this.createNamespace({
-      name: 'user',
-      pid: false,  // Share PID space for debugging
-      mount: false,// Share filesystem
-      net: false   // Share network
-    });
-    
-    // Create secure namespace (isolated for credentials)
-    const secure = await this.createNamespace({
-      name: 'secure',
-      pid: true,   // Separate PID namespace
-      mount: true, // Separate /proc (hide credentials)
-      net: false   // Share network
-    });
-    
-    return { control, user, secure };
+  private async detectCapabilities() {
+    try {
+      // Test if we can create namespaces
+      execSync('unshare --pid --fork true', { stdio: 'ignore' });
+      return { hasNamespaces: true, mode: 'production' as const };
+    } catch {
+      // Local dev environment without CAP_SYS_ADMIN
+      return { hasNamespaces: false, mode: 'development' as const };
+    }
   }
-}
 ```
 
 ### Phase 2: Context Management API
@@ -272,23 +274,36 @@ class ExecutionContext {
 
 ## Testing & Validation
 
-### Test 1: Control Plane Protection
+### Test 1: Control Plane Protection (Environment-Aware)
 ```typescript
-test('Control plane is invisible and unkillable', async () => {
+test('Control plane protection works per environment', async () => {
+  const capabilities = await detectCapabilities();
   const userCtx = await sandbox.createContext({ name: 'user' });
   
-  // User context can't see Jupyter/Bun
-  const ps = await userCtx.exec('ps aux');
-  expect(ps.stdout).not.toContain('jupyter');
-  expect(ps.stdout).not.toContain('bun serve');
-  
-  // User context can't kill them
-  await userCtx.exec('pkill jupyter');
-  await userCtx.exec('pkill bun');
-  
-  // Control plane still running
-  const health = await fetch('http://localhost:8080/health');
-  expect(health.ok).toBe(true);
+  if (capabilities.mode === 'production') {
+    // PRODUCTION: Full invisibility
+    const ps = await userCtx.exec('ps aux');
+    expect(ps.stdout).not.toContain('jupyter');
+    expect(ps.stdout).not.toContain('bun serve');
+    
+    // Can't kill hidden processes
+    await userCtx.exec('pkill jupyter');
+    await userCtx.exec('pkill bun');
+    
+    // Services still running
+    const health = await fetch('http://localhost:8080/health');
+    expect(health.ok).toBe(true);
+    
+  } else {
+    // LOCAL DEV: Visible but protected by convention
+    const ps = await userCtx.exec('ps aux');
+    console.warn('⚠️ Local dev: Control plane visible');
+    expect(ps.stdout).toContain('jupyter');  // Visible
+    expect(ps.stdout).toContain('bun');      // Visible
+    
+    // Document the limitation
+    expect(capabilities.hasNamespaces).toBe(false);
+  }
 });
 ```
 
@@ -493,30 +508,30 @@ export class UniversalRouter {
 
 ## Implementation Timeline
 
-### Week 1: Simplified Implementation
-**Goal**: Minimal control plane protection + universal routing
+### Week 1: Minimal Implementation
+**Goal**: Hide control plane + credential routing (leveraging existing isolation)
 
-1. **Day 1**: Control plane isolation
-   - Simple `unshare --pid` for Bun/Jupyter
-   - Verify processes hidden from user code
-   - Test port pre-binding
+1. **Day 1**: Control plane hiding (1 hour!)
+   - One `unshare --pid` command at startup
+   - Verify Bun/Jupyter invisible to user code
+   - Done - that's all for control plane protection!
    
-2. **Day 2**: LD_PRELOAD interceptor
-   - Write `universal_router.c`
-   - Compile to shared library
-   - Test all exec variants
+2. **Day 2**: Context-based credentials
+   - Simple context management in bun server
+   - Platform context vs user context
+   - Credential separation without complex namespaces
    
-3. **Day 3**: Routing daemon
-   - Unix socket server
-   - Context lookup
-   - Test routing
+3. **Day 3**: LD_PRELOAD universal routing
+   - Simple interceptor (no pattern matching)
+   - Route ALL AI children to user context
+   - Test with real AI agents
    
-4. **Day 4-5**: Integration
-   - Test with Claude Code
-   - Verify credential isolation
-   - Confirm universal routing works
+4. **Day 4-5**: Integration & testing
+   - Verify with Claude Code
+   - Confirm credential isolation
+   - Document simplified approach
 
-**Note**: This is much simpler than general sandboxing because we're already inside strong isolation (Firecracker+Docker).
+**Why so simple?** We're already inside Firecracker+Docker - we just need to hide control plane and route credentials!
 
 ### Week 2: SDK Integration
 **Goal**: Update SDK client with new behavior
@@ -552,59 +567,102 @@ export class UniversalRouter {
 
 ## Performance Characteristics
 
-### Namespace Creation (One-time at startup)
+### Production Environment
 ```
-Control namespace creation: ~10ms
-User namespace creation: ~5ms  
-Secure namespace creation: ~10ms
-Total startup overhead: ~25ms (once per container)
-```
-
-### Command Execution Overhead
-```
-Regular exec() in user namespace: ~0ms overhead
-Secure exec() with env: ~2-3ms overhead (namespace switch)
+Control plane hiding (unshare): ~10ms (once at startup)
+Context creation: ~1ms per context
+LD_PRELOAD routing: ~0.5ms per exec
+Total startup overhead: ~15ms
+Memory usage: ~2MB for hidden control plane
 ```
 
-### Memory Usage
+### Local Development
 ```
-Per namespace overhead: ~2MB
-Total for 3 namespaces: ~6MB
+Control plane (no hiding): 0ms overhead
+Context creation: ~1ms per context  
+LD_PRELOAD routing: ~0.5ms per exec
+Total startup overhead: ~5ms
+Memory usage: Standard process memory
 ```
 
-## Fallback for Local Development
+### Context Execution Overhead (Both Environments)
+```
+Regular exec(): ~0ms overhead
+Context-based exec(): ~1-2ms overhead
+With LD_PRELOAD routing: ~2-3ms total
+```
 
+## Environment Detection and Graceful Fallback
+
+### Capability Detection
 ```typescript
 // container_src/utils/capabilities.ts
 export async function detectCapabilities() {
-  try {
-    // Test if we can create namespaces
-    execSync('unshare --pid --fork true', { stdio: 'ignore' });
-    return {
-      hasNamespaces: true,
-      mode: 'production'
-    };
-  } catch {
-    // Local dev environment
-    console.warn(
-      '[LOCAL DEV] Running without namespace isolation.\n' +
-      'Control plane protection and credential isolation disabled.'
-    );
-    return {
-      hasNamespaces: false,
-      mode: 'development'
-    };
-  }
-}
-
-// Graceful degradation
-if (capabilities.mode === 'development') {
-  // Single namespace fallback
-  this.namespaces = {
-    control: defaultNamespace,
-    user: defaultNamespace,
-    secure: defaultNamespace  // Warning on use
+  const checks = {
+    hasNamespaces: false,
+    hasCapSysAdmin: false,
+    hasCgroupDelegation: false,
+    seccompMode: -1,
+    mode: 'unknown' as 'production' | 'development' | 'unknown'
   };
+  
+  try {
+    // Test namespace creation (requires CAP_SYS_ADMIN)
+    execSync('unshare --pid --fork true', { stdio: 'ignore' });
+    checks.hasNamespaces = true;
+    checks.hasCapSysAdmin = true;
+    
+    // Test cgroup delegation
+    const testDir = '/sys/fs/cgroup/test_' + Date.now();
+    try {
+      mkdirSync(testDir);
+      rmdirSync(testDir);
+      checks.hasCgroupDelegation = true;
+    } catch {}
+    
+    // Check seccomp mode
+    const status = readFileSync('/proc/self/status', 'utf8');
+    const seccomp = status.match(/Seccomp:\s+(\d+)/);
+    if (seccomp) checks.seccompMode = parseInt(seccomp[1]);
+    
+    // Determine environment
+    checks.mode = checks.hasCapSysAdmin ? 'production' : 'development';
+    
+  } catch (error) {
+    checks.mode = 'development';
+  }
+  
+  return checks;
+}
+```
+
+### Graceful Degradation Strategy
+```typescript
+// Usage with graceful degradation
+export class IsolationStrategy {
+  constructor(private capabilities: ReturnType<typeof detectCapabilities>) {}
+  
+  async hideControlPlane() {
+    if (this.capabilities.hasNamespaces) {
+      // Production: Full hiding via unshare
+      return this.useNamespaceHiding();
+    } else {
+      // Local: Control plane remains visible
+      console.warn('⚠️ Control plane visible in local development');
+      console.warn('   Avoid pkill/killall commands');
+      return this.startServicesNormally();
+    }
+  }
+  
+  async isolateCredentials(context: string, env: Record<string, string>) {
+    // Context-based isolation works in both environments
+    // But in local dev, processes remain visible
+    return new ExecutionContext({
+      name: context,
+      env,
+      isolated: this.capabilities.hasNamespaces
+    });
+  }
 }
 ```
 

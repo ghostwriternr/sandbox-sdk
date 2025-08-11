@@ -1,6 +1,13 @@
 # Security Test Worker
 
-This worker tests the security capabilities and limitations of Cloudflare Containers, and validates namespace isolation implementation.
+This worker tests the security capabilities and limitations of Cloudflare Containers, and validates our simplified security approach.
+
+## Our Simplified Approach
+
+We're leveraging existing isolation (Firecracker VM + Docker container) and adding minimal control plane protection:
+1. **Hide control plane** - Simple `unshare --pid` to hide Bun/Jupyter
+2. **Context-based credentials** - Separate contexts for platform vs user
+3. **Universal routing** - LD_PRELOAD to route ALL AI children to user context
 
 ## Setup
 
@@ -48,43 +55,45 @@ This tests:
 - /proc filesystem enumeration
 - Cross-process environment reading
 
-### 4. 🆕 Comprehensive Security Validation
+### 4. 🆕 Simplified Security Test
 ```bash
-curl https://your-worker.workers.dev/test-comprehensive
+curl https://your-worker.workers.dev/test-simplified
 ```
 
-This is the main validation endpoint that:
-- Detects SDK version (v1.x vulnerable vs v2.0 with isolation)
-- Tests current vulnerabilities if no isolation is implemented
-- Validates namespace isolation if new methods are available
+This tests our simplified approach:
+- Control plane hiding (Bun/Jupyter invisible to user code)
+- Context-based credential separation
+- LD_PRELOAD universal routing concept
+- Port protection (pre-binding)
 - Provides clear VULNERABLE/SECURE status
 
 ## Success Criteria
 
-### Using `/test-comprehensive` for Validation
+### Using `/test-simplified` for Validation
 
-The comprehensive test will show different results based on implementation status:
+The test will show different results based on implementation status:
 
-#### Before Implementation (Current State - v1.x)
+#### Before Implementation (Current State)
 ```json
 {
   "summary": {
     "status": "VULNERABLE",
     "message": "🚨 Current implementation exposes secrets to all code",
-    "implementation": "v1.x (without isolation)",
-    "vulnerabilities": 1
+    "implementation": "v1.x (vulnerable)",
+    "approach": "Leveraging existing Firecracker+Docker, minimal additional isolation"
   }
 }
 ```
 
-#### After Implementation (Target State - v2.0)
+#### After Implementation (Target State)
 ```json
 {
   "summary": {
     "status": "SECURE",
-    "message": "🎉 Namespace isolation working correctly!",
-    "implementation": "v2.0 (with isolation)",
-    "passed": 8,
+    "message": "🎉 Context-based isolation working!",
+    "implementation": "Simplified (contexts + hiding + routing)",
+    "approach": "Leveraging existing Firecracker+Docker, minimal additional isolation",
+    "passed": 6,
     "failed": 0
   }
 }
@@ -92,42 +101,53 @@ The comprehensive test will show different results based on implementation statu
 
 ### What Each Test Validates
 
-| Test | Current (v1.x) | Target (v2.0) |
-|------|----------------|---------------|
-| Environment Variables | ❌ Exposed to all code | ✅ Isolated in namespace |
-| Process Visibility | ❌ All processes visible | ✅ Isolated processes hidden |
-| /proc Access | ❌ Can read any process | ✅ Cross-namespace blocked |
-| File Sharing | ✅ Works | ✅ Still works |
-| Performance | N/A | ✅ < 10ms overhead |
+| Test | Current | Target (Simplified) |
+|------|---------|--------------------|
+| Control Plane | ❌ Visible (can pkill) | ✅ Hidden via unshare |
+| Credentials | ❌ Exposed to all code | ✅ Context-based isolation |
+| AI Children | ❌ Inherit platform creds | ✅ Route to user context |
+| Port Protection | ⚠️ Can be hijacked | ✅ Pre-bound by control plane |
+| Complexity | N/A | ✅ Minimal (leverage existing) |
 
 ## Production vs Local Development
 
 ### Production Environment
 - ✅ Has CAP_SYS_ADMIN (discovered through testing!)
-- ✅ Can create namespaces
-- ✅ Full isolation possible
+- ✅ Can use `unshare --pid` to hide control plane
+- ✅ Already inside Firecracker VM + Docker container
+- ✅ Minimal additional isolation needed
 
 ### Local Development
 - ❌ No CAP_SYS_ADMIN (safety restriction)
-- ⚠️ Falls back to process isolation
-- ⚠️ Shows warning about degraded security
+- ⚠️ Control plane remains visible
+- ⚠️ Falls back to context-based isolation only
+- ℹ️ Still inside Docker container isolation
 
 ## How to Use for Implementation Validation
 
 1. **Before starting implementation:**
    ```bash
-   curl http://localhost:8787/test-comprehensive | jq .summary
+   curl http://localhost:8787/test-simplified | jq .summary
    # Should show "status": "VULNERABLE"
    ```
 
-2. **After implementing namespace isolation:**
+2. **After implementing simplified approach:**
    ```bash
-   curl http://localhost:8787/test-comprehensive | jq .summary
+   curl http://localhost:8787/test-simplified | jq .summary
    # Should show "status": "SECURE"
    ```
 
 3. **Check specific test results:**
    ```bash
-   curl http://localhost:8787/test-comprehensive | jq .tests
+   curl http://localhost:8787/test-simplified | jq .tests
    # Review each test for pass/fail status
    ```
+
+## Key Insight
+
+We discovered we're already inside strong isolation (Firecracker+Docker). We don't need complex sandboxing - just:
+1. Hide control plane from user code
+2. Separate credentials via contexts
+3. Route AI agent children appropriately
+
+This is much simpler than building a full sandbox inside a sandbox!
