@@ -118,12 +118,32 @@ export async function handleExecuteRequest(
 
     console.log(`[Server] Executing command: ${command}`);
 
-    // Use context manager if available for isolation
+    // ALWAYS use context manager for isolation (implicit contexts)
     let result;
     if (contextManager) {
       try {
-        // Execute in default context with isolation
-        const execResult = await contextManager.exec(command);
+        // Check if we have a session-specific context
+        let contextName = 'default';
+        if (sessionId) {
+          // Use session-specific context for stateful operations
+          contextName = `session-${sessionId}`;
+          let ctx = contextManager.getContext(contextName);
+          if (!ctx) {
+            // Create session context on-demand with user's env/cwd
+            await contextManager.createContext({
+              name: contextName,
+              env: env || {},
+              cwd: cwd || '/workspace',
+              isolation: true
+            });
+          }
+        }
+        
+        // Execute in the appropriate context
+        const execResult = contextName === 'default' 
+          ? await contextManager.exec(command)
+          : await contextManager.getContext(contextName)!.exec(command);
+          
         result = {
           ...execResult,
           success: execResult.exitCode === 0
@@ -134,7 +154,7 @@ export async function handleExecuteRequest(
         result = await executeCommand(sessions, command, { sessionId, background, cwd, env });
       }
     } else {
-      // Regular execution without isolation
+      // Fallback if context manager not available
       result = await executeCommand(sessions, command, { sessionId, background, cwd, env });
     }
 
