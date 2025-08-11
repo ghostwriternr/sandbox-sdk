@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Add a label to force rebuild
-LABEL build_date="2025-01-07-v2"
+LABEL build_date="2025-08-11-v2"
 
 # Expose ports (required for local dev)
 EXPOSE 3000

@@ -1,5 +1,6 @@
 import { spawn, ChildProcess, execSync } from 'child_process';
 import { Readable, Writable } from 'stream';
+import { PersistentNamespace, execInNamespace, canCreateNamespaces } from './namespace';
 
 export interface ContextOptions {
   name: string;
@@ -37,9 +38,11 @@ export class ExecutionContext {
   private env: Record<string, string>;
   private cwd: string;
   private shellProcess?: ChildProcess;
+  private persistentNamespace?: PersistentNamespace;
   private childContext?: string;
   private persistent: boolean;
   private isolation: 'none' | 'secure';
+  private hasNamespaces: boolean;
   
   constructor(options: ContextOptions) {
     this.name = options.name;
@@ -48,17 +51,24 @@ export class ExecutionContext {
     this.childContext = options.childContext;
     this.persistent = options.persistent ?? true;
     this.isolation = options.isolation || 'secure';
+    this.hasNamespaces = canCreateNamespaces();
   }
   
   async initialize(): Promise<void> {
-    // Create persistent shell if requested
-    if (this.persistent) {
+    // Create persistent namespace if isolation is enabled and we have capabilities
+    if (this.persistent && this.isolation === 'secure' && this.hasNamespaces) {
+      console.log(`[ExecutionContext:${this.name}] Creating persistent namespace session`);
+      this.persistentNamespace = new PersistentNamespace(this.name, this.env, this.cwd);
+      await this.persistentNamespace.initialize();
+    } 
+    // Fallback to regular shell if no namespace capabilities
+    else if (this.persistent) {
       await this.createShell();
     }
   }
   
   async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
-    console.log(`[ExecutionContext:${this.name}] exec: ${command}, persistent=${this.persistent}, hasShell=${!!this.shellProcess}`);
+    console.log(`[ExecutionContext:${this.name}] exec: ${command}, persistent=${this.persistent}, hasNamespace=${!!this.persistentNamespace}`);
     
     // Enable universal routing for AI agents
     if (this.childContext && this.isAIAgent(command)) {
@@ -66,9 +76,25 @@ export class ExecutionContext {
       return await this.execWithRouting(command, options);
     }
     
-    // Normal execution without routing
+    // Use persistent namespace if available (maintains state + isolation)
+    if (this.persistentNamespace) {
+      console.log(`[ExecutionContext:${this.name}] Using persistent namespace session`);
+      return await this.persistentNamespace.exec(command);
+    }
+    
+    // Use namespace isolation for non-persistent secure contexts
+    if (this.isolation === 'secure' && this.hasNamespaces && !this.persistent) {
+      console.log(`[ExecutionContext:${this.name}] Using isolated namespace (stateless)`);
+      return await execInNamespace(command, {
+        env: { ...this.env, ...options?.env },
+        cwd: options?.cwd || this.cwd,
+        timeout: options?.timeout
+      });
+    }
+    
+    // Fallback to shell or direct execution
     if (this.shellProcess && this.persistent) {
-      console.log(`[ExecutionContext:${this.name}] Using persistent shell`);
+      console.log(`[ExecutionContext:${this.name}] Using persistent shell (no isolation)`);
       return await this.execInShell(command, options);
     } else {
       console.log(`[ExecutionContext:${this.name}] Using direct exec, env keys:`, Object.keys(this.env));
@@ -284,14 +310,18 @@ export class ExecutionContext {
   
   async cd(path: string): Promise<void> {
     this.cwd = path;
-    if (this.shellProcess) {
+    if (this.persistentNamespace) {
+      await this.persistentNamespace.cd(path);
+    } else if (this.shellProcess) {
       await this.execInShell(`cd ${path}`);
     }
   }
   
   async setEnv(vars: Record<string, string>): Promise<void> {
     this.env = { ...this.env, ...vars };
-    if (this.shellProcess) {
+    if (this.persistentNamespace) {
+      await this.persistentNamespace.setEnv(vars);
+    } else if (this.shellProcess) {
       for (const [key, value] of Object.entries(vars)) {
         await this.execInShell(`export ${key}="${value}"`);
       }
@@ -306,7 +336,9 @@ export class ExecutionContext {
   }
   
   async pwd(): Promise<string> {
-    if (this.shellProcess) {
+    if (this.persistentNamespace) {
+      return await this.persistentNamespace.pwd();
+    } else if (this.shellProcess) {
       const result = await this.execInShell('pwd');
       return result.stdout.trim();
     }
@@ -322,6 +354,10 @@ export class ExecutionContext {
   }
   
   async destroy(): Promise<void> {
+    if (this.persistentNamespace) {
+      this.persistentNamespace.destroy();
+      this.persistentNamespace = undefined;
+    }
     if (this.shellProcess) {
       this.shellProcess.kill('SIGTERM');
       this.shellProcess = undefined;

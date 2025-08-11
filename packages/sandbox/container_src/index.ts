@@ -229,7 +229,7 @@ const server = serve({
 
         case "/api/execute":
           if (req.method === "POST") {
-            return handleExecuteRequest(sessions, req, corsHeaders);
+            return handleExecuteRequest(sessions, req, corsHeaders, contextManager);
           }
           break;
 

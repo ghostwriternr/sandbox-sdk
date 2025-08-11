@@ -1,96 +1,90 @@
-# Implementation Plan for Critical Security Issues
+# Implementation Plan for Critical Security Issues - UPDATED
 
-## Focus: Three Critical Problems Only
+## ⚠️ CRITICAL ARCHITECTURAL FIX REQUIRED
 
-1. **Process Killing** → PID namespace isolation
-2. **Port Hijacking** → Pre-binding + port reservation
-3. **Credential Exposure** → Isolated execution contexts
+### Fundamental Flaw Discovered
+Our initial implementation had the isolation **backwards**. We isolated the control plane, but user commands still ran in the host namespace where they could see everything!
 
-Everything else is deferred as nice-to-have.
+## Focus: Three Critical Problems (Corrected Approach)
 
-## Implementation Architecture
+1. **Process Killing** → Isolate USER commands in PID namespaces
+2. **Port Hijacking** → Pre-binding + proper isolation
+3. **Credential Exposure** → Context-based isolation with namespace enforcement
 
-### Environment Context
-```
-Cloudflare Infrastructure
-└── Firecracker VM (hardware isolation)
-    └── Docker Container (namespace isolation)
-        └── Our Sandbox (minimal isolation needed WITHIN container)
-```
+## The Problem: Wrong Isolation Direction
 
-**Critical Insight**: We're already inside strong isolation (Firecracker+Docker). We only need to:
-1. Hide control plane (Bun/Jupyter) from user code
-2. Separate credentials via contexts
-3. Route AI agent children to user context
-
-### Current State (Vulnerable)
-```
-Docker Container
-├── All processes visible (user can pkill jupyter/bun)
-├── Shared environment variables (credentials leaked)
-└── Ports can be hijacked (8080, 8888)
+### What We Built (BROKEN)
+```bash
+# startup.sh wrapped control plane in isolation
+unshare --pid --fork --mount-proc bash -c '
+  jupyter server &  # In isolated namespace
+  bun index.ts &    # In isolated namespace
+'
+# BUT: When Bun spawns user commands via spawn()...
+# They run in HOST namespace and can see everything!
 ```
 
-### Target State (Simplified - What We're Building)
+### Why It Failed
 ```
-Docker Container
-├── Control Plane (Hidden via simple unshare --pid)
-│   ├── Bun Server (port 8080) - invisible to ps/pkill
-│   └── Jupyter Kernel (port 8888) - invisible to ps/pkill
+Container
+├── Isolated Namespace (unshare)
+│   ├── Jupyter (PID 1)
+│   ├── Bun (PID 2)
+│   └── When Bun calls spawn(userCommand)
+│       └── Child inherits HOST namespace! ❌
+└── Host Namespace
+    └── User commands can see ALL processes
+```
+
+## The Solution: Inverse Isolation Model
+
+### Correct Architecture (FIXED)
+```
+Container (Default Namespace)
+├── Control Plane (runs normally, no isolation)
+│   ├── Bun Server (port 3000) - visible but that's OK
+│   └── Jupyter (port 8888) - visible but that's OK
 │
-└── User Space (Default namespace)
-    ├── Platform Context (AI agents run here)
-    │   ├── Has ANTHROPIC_API_KEY
-    │   └── LD_PRELOAD routes ALL children to user context
-    └── User Context (AI children run here)
-        ├── Has CLOUDFLARE_API_TOKEN, AWS_KEY
-        └── Never sees platform credentials
+└── User Commands (EACH wrapped in isolation)
+    └── unshare --pid --fork --mount-proc bash -c 'userCommand'
+        └── Cannot see control plane! ✅
 ```
 
-**Implementation**: One `unshare` command + contexts + LD_PRELOAD = Complete isolation
+**Key Insight**: Don't isolate the control plane. Isolate EVERY user command!
 
 ## Implementation Details
 
-### Phase 1: Minimal Container Startup (Environment-Aware)
+### Phase 1: Fixed Container Startup (Corrected)
 
 ```typescript
 // container_src/index.ts
 class ContainerServer {
   private contexts: Map<string, ExecutionContext> = new Map();
-  private controlPlanePid: number;
   private capabilities: { hasNamespaces: boolean; mode: 'production' | 'development' };
   
   async initialize() {
     // Step 0: Detect environment capabilities
     this.capabilities = await this.detectCapabilities();
     
-    // Step 1: Hide control plane (production only)
+    // Step 1: Start control plane NORMALLY (no isolation!)
+    // Control plane runs in default namespace - this is correct!
+    console.log('Starting control plane in default namespace...');
+    spawn('jupyter', ['server', '--config=/container-server/jupyter_config.py'], { 
+      detached: true 
+    });
+    spawn('bun', ['index.ts'], { 
+      detached: true 
+    });
+    
     if (this.capabilities.hasNamespaces) {
-      // PRODUCTION: Full isolation available
-      const control = spawn('unshare', [
-        '--pid',           // Hide from ps/pkill
-        '--fork',          // Fork before exec
-        '--mount-proc',    // Separate /proc
-        'sh', '-c', `
-          # Start services hidden from user code
-          bun serve --port 8080 &
-          jupyter kernel --port 8888 &
-          sleep infinity  # Keep namespace alive
-        `
-      ]);
-      this.controlPlanePid = control.pid;
-      console.log('✅ Production: Control plane hidden via unshare');
+      console.log('✅ Production: User commands will be isolated via unshare');
     } else {
-      // LOCAL DEV: Graceful fallback
       console.warn(
         '⚠️ Local Development Mode\n' +
         '   - Control plane remains visible (no CAP_SYS_ADMIN)\n' +
-        '   - Avoid using pkill/killall commands\n' +
-        '   - Context isolation still works for credentials'
+        '   - User commands not isolated\n' +
+        '   - Context credential isolation still works'
       );
-      // Start services normally (visible but functional)
-      spawn('bun', ['serve', '--port', '8080'], { detached: true });
-      spawn('jupyter', ['kernel', '--port', '8888'], { detached: true });
     }
     
     // Step 2: Set up universal routing (works in both environments)
@@ -108,6 +102,18 @@ class ContainerServer {
     } catch {
       // Local dev environment without CAP_SYS_ADMIN
       return { hasNamespaces: false, mode: 'development' as const };
+    }
+  }
+
+  // NEW: Execute user commands in isolation
+  async executeUserCommand(command: string, options?: ExecOptions) {
+    if (this.capabilities.hasNamespaces) {
+      // PRODUCTION: Wrap user command in namespace isolation
+      const isolatedCommand = `unshare --pid --fork --mount-proc bash -c '${command}'`;
+      return spawn(isolatedCommand, options);
+    } else {
+      // LOCAL DEV: No isolation available
+      return spawn(command, options);
     }
   }
 ```
@@ -150,7 +156,7 @@ export function getContext(name: string): ExecutionContext {
 }
 ```
 
-### Phase 3: ExecutionContext Implementation
+### Phase 3: ExecutionContext Implementation with Persistent Namespaces
 
 ```typescript
 // container_src/utils/context.ts
@@ -158,45 +164,128 @@ class ExecutionContext {
   private name: string;
   private env: Record<string, string>;
   private cwd: string;
-  private shellProcess?: ChildProcess;
-  private namespace?: Namespace;
+  private persistentNamespace?: PersistentNamespace;
   private childContext?: string;  // Universal routing target
+  private capabilities: Capabilities;
   
   constructor(options: ContextOptions) {
     this.name = options.name;
     this.env = options.env || {};
     this.cwd = options.cwd || '/workspace';
     this.childContext = options.childContext;
-    this.routeChild = options.routeChild;
+    this.persistent = options.persistent ?? true;
   }
   
   async initialize() {
-    // Create namespace if isolation requested
-    if (this.options.isolation === 'secure') {
-      this.namespace = await this.createNamespace();
+    this.capabilities = await detectCapabilities();
+    
+    // Create persistent namespace session if requested
+    if (this.persistent && this.capabilities.hasNamespaces) {
+      // OPTION 3: Create ONE isolated namespace for this context
+      // All commands will run in this SAME namespace (maintains state)
+      this.persistentNamespace = await this.createPersistentNamespace();
+    }
+  }
+  
+  private async createPersistentNamespace(): Promise<PersistentNamespace> {
+    // Start a long-lived bash process in an isolated namespace
+    const nsProcess = spawn('unshare', [
+      '--pid',        // Separate PID namespace (hides control plane)
+      '--fork',       // Fork before exec
+      '--mount-proc', // Mount new /proc (can't see host processes)
+      'bash',         // Interactive bash session
+      '--norc'        // Don't load .bashrc
+    ], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...this.env,
+        PS1: `[${this.name}]$ `,  // Custom prompt
+        HOME: '/workspace',
+        PATH: process.env.PATH
+      }
+    });
+    
+    // Wait for bash to be ready
+    await this.waitForPrompt(nsProcess);
+    
+    // Initialize working directory
+    if (this.cwd !== '/workspace') {
+      await this.sendCommand(nsProcess, `cd ${this.cwd}`);
     }
     
-    // Create persistent shell if requested
-    if (this.options.persistent) {
-      this.shellProcess = await this.createShell();
+    // Set initial environment variables
+    for (const [key, value] of Object.entries(this.env)) {
+      await this.sendCommand(nsProcess, `export ${key}="${value}"`);
     }
+    
+    return {
+      process: nsProcess,
+      exec: (cmd: string) => this.execInNamespace(nsProcess, cmd),
+      destroy: () => nsProcess.kill()
+    };
+  }
+  
+  private async execInNamespace(
+    nsProcess: ChildProcess, 
+    command: string
+  ): Promise<ExecResult> {
+    // Send command to the persistent namespace
+    nsProcess.stdin.write(`${command}\n`);
+    
+    // Capture output until next prompt
+    const output = await this.readUntilPrompt(nsProcess.stdout);
+    
+    return {
+      stdout: output.stdout,
+      stderr: output.stderr,
+      exitCode: output.exitCode
+    };
   }
   
   async exec(command: string, options?: ExecOptions) {
     // Enable universal routing for AI agents
     if (this.childContext && this.isAIAgent(command)) {
-      // ALL child processes will route to childContext
       return await this.execWithRouting(command, options);
     }
     
-    // Normal execution without routing
-    if (this.shellProcess) {
-      return await this.execInShell(command, options);
-    } else if (this.namespace) {
-      return await this.namespace.exec(command, options);
-    } else {
-      return await this.execDirect(command, options);
+    // Use persistent namespace if available (maintains state)
+    if (this.persistentNamespace) {
+      return await this.persistentNamespace.exec(command);
     }
+    
+    // Fallback: Fresh isolation per command (stateless)
+    if (this.capabilities.hasNamespaces) {
+      const isolatedCommand = `unshare --pid --fork --mount-proc bash -c '${command}'`;
+      return await this.execDirect(isolatedCommand, options);
+    }
+    
+    // Local dev: No isolation available
+    return await this.execDirect(command, options);
+  }
+  
+  // Session state management
+  async cd(path: string) {
+    this.cwd = path;
+    if (this.persistentNamespace) {
+      await this.persistentNamespace.exec(`cd ${path}`);
+    }
+  }
+  
+  async setEnv(vars: Record<string, string>) {
+    this.env = { ...this.env, ...vars };
+    if (this.persistentNamespace) {
+      for (const [key, value] of Object.entries(vars)) {
+        await this.persistentNamespace.exec(`export ${key}="${value}"`);
+      }
+    }
+  }
+  
+  async pwd(): Promise<string> {
+    if (this.persistentNamespace) {
+      const result = await this.persistentNamespace.exec('pwd');
+      return result.stdout.trim();
+    }
+    return this.cwd;
   }
   
   private async execWithRouting(command: string, options?: ExecOptions) {
@@ -271,6 +360,30 @@ class ExecutionContext {
   }
 }
 ```
+
+## Why Persistent Namespace Sessions (Option 3)
+
+### The Problem with Fresh Isolation Per Command
+If we used fresh `unshare` for every command:
+- `cd /app` → New namespace (forgets immediately)
+- `npm install` → New namespace (back in /workspace!)
+- `npm start` → New namespace (dependencies not found!)
+
+### The Solution: Persistent Namespace Sessions
+Create ONE isolated namespace per context that lives for the entire session:
+- `cd /app` → Namespace A (remembers)
+- `npm install` → Same Namespace A (still in /app)
+- `npm start` → Same Namespace A (finds node_modules)
+- Background processes persist
+- Environment variables persist
+- Working directory persists
+- Control plane STILL hidden!
+
+### Implementation Benefits
+1. **User Experience**: Behaves like a normal shell session
+2. **Security**: Control plane remains completely hidden
+3. **Performance**: No namespace creation overhead per command
+4. **Simplicity**: One namespace per context, easy to reason about
 
 ## Testing & Validation
 

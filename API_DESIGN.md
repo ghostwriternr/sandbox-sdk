@@ -1,14 +1,16 @@
-# API Design for Critical Security Issues
+# API Design for Critical Security Issues - UPDATED
 
-## Focus: The Three Critical Problems
+## ⚠️ CRITICAL: Inverse Isolation Model Required
 
-We're focusing ONLY on issues that break the sandbox:
+After discovering that our initial implementation isolated the wrong direction, we need to update the API design to reflect the correct approach.
 
-1. **Process Killing** - User code can kill Jupyter/Bun → Sandbox dies
-2. **Port Hijacking** - User code can steal ports 8080/8888 → Control plane fails  
-3. **Credential Exposure** - Secrets visible in environment → Financial/security risk
+## Focus: The Three Critical Problems (Corrected)
 
-Everything else (resource limits, metadata endpoints, etc.) is nice-to-have but not urgent.
+1. **Process Killing** - Isolate USER commands so they can't see/kill Jupyter/Bun
+2. **Port Hijacking** - USER commands run in isolated namespace, can't steal ports
+3. **Credential Exposure** - Context credentials + namespace isolation = complete protection
+
+**The Fix**: Don't isolate the control plane. Isolate every user command execution!
 
 ## API Design Evolution
 
@@ -77,10 +79,14 @@ interface ContextOptions {
   name: string;
   env?: Record<string, string>;
   cwd?: string;
-  persistent?: boolean;  // Maintain pwd, env changes
+  persistent?: boolean;  // DEFAULT: true - Creates ONE namespace for context lifetime
   isolation?: 'none' | 'secure';  // Namespace isolation level
   childContext?: string;  // Route ALL child processes to this context
-  // Note: We removed routeChild callback - universal routing is simpler
+  
+  // CRITICAL: How persistent sessions work with isolation:
+  // persistent=true  → ONE isolated namespace, commands share state (pwd, env, processes)
+  // persistent=false → FRESH namespace per command, no state sharing
+  // Both modes hide control plane in production!
 ```
 
 ### How It Works
@@ -90,7 +96,7 @@ interface ContextOptions {
 const platform = await sandbox.createContext({
   name: "platform",
   env: { ANTHROPIC_API_KEY: platformKey },
-  persistent: true,
+  persistent: true,  // ONE namespace for all platform commands
   childContext: "user"  // ALL children route to user context (universal routing)
 });
 
@@ -100,7 +106,7 @@ const user = await sandbox.createContext({
     CLOUDFLARE_API_TOKEN: userToken,
     AWS_ACCESS_KEY_ID: userAwsKey
   },
-  persistent: true
+  persistent: true  // ONE namespace for all user commands
 });
 
 // Execute in specific contexts
@@ -111,10 +117,51 @@ await platform.exec("claude code --prompt 'create worker'");
 await user.exec("wrangler deploy");
 // Gets: CLOUDFLARE_API_TOKEN
 
-// Contexts maintain state
+// CRITICAL: Persistent sessions maintain state across commands!
 await user.exec("cd /my-project");
-await user.exec("npm install");  // Runs in /my-project
+await user.exec("npm install");  // Still in /my-project
+await user.exec("export NODE_ENV=production");
+await user.exec("npm start &");  // Background process persists
+await user.exec("ps aux");  // Sees npm process, NOT Jupyter/Bun!
 await user.exec("pwd");  // Output: /my-project
+await user.exec("echo $NODE_ENV");  // Output: production
+
+// Behind the scenes: ALL these commands run in the SAME isolated namespace
+// - Control plane (Jupyter/Bun) is invisible
+// - Working directory persists
+// - Environment variables persist
+// - Background processes persist
+// - Complete isolation maintained!
+```
+
+### Persistent vs Stateless Contexts
+
+```typescript
+// PERSISTENT CONTEXT (default - recommended for most use cases)
+const devContext = await sandbox.createContext({
+  name: "development",
+  persistent: true,  // ONE isolated namespace for context lifetime
+  env: { NODE_ENV: "development" }
+});
+
+// All run in SAME namespace - state preserved
+await devContext.exec("cd /app");
+await devContext.exec("git pull");  // Still in /app
+await devContext.exec("npm install");  // Still in /app
+await devContext.exec("npm test &");  // Background process
+await devContext.exec("tail -f test.log");  // Can see test output
+
+// STATELESS CONTEXT (for one-off commands)
+const tempContext = await sandbox.createContext({
+  name: "temp",
+  persistent: false,  // FRESH namespace per command
+  env: { TEMP: "true" }
+});
+
+// Each command gets fresh isolation - no state
+await tempContext.exec("cd /tmp");  // Isolated
+await tempContext.exec("pwd");  // Output: /workspace (NOT /tmp!)
+// Each command starts fresh
 ```
 
 ### Why This Design Wins
@@ -126,43 +173,61 @@ await user.exec("pwd");  // Output: /my-project
 5. **Stateful Sessions** - Each context maintains pwd, env changes, etc.
 6. **Clear Mental Model** - "Context = Environment + State + Credentials"
 
-## Behind the Scenes: Simplified Architecture
+## Behind the Scenes: Corrected Architecture
 
 ### Important Context
 We're already running inside:
 - **Firecracker VM** (hardware isolation provided by Cloudflare)
 - **Docker Container** (namespace isolation provided by container runtime)
 
-We only need lightweight isolation WITHIN the container to protect our control plane.
+### CRITICAL FIX: Inverse Isolation Model
 
+**What we built initially (BROKEN):**
+```
+Container
+└── Isolated Namespace (unshare wrapper)
+    ├── Jupyter (hidden)
+    ├── Bun (hidden)
+    └── But user commands escape to host namespace! ❌
+```
+
+**Correct Architecture (FIXED):**
 ```
 Firecracker VM (Cloudflare infrastructure)
 └── Docker Container (Our Dockerfile)
-    ├── Control Plane (Hidden via simple PID namespace)
-    │   ├── Bun Server (port 8080) - invisible to user code
-    │   └── Jupyter Kernel (port 8888) - invisible to user code
+    ├── Control Plane (Default namespace - visible)
+    │   ├── Bun Server (port 3000) - runs normally
+    │   └── Jupyter (port 8888) - runs normally
     │
-    └── User Space (Default namespace)
-        ├── Platform Context
-        │   ├── AI agents run here (Claude, etc.)
-        │   ├── Has ANTHROPIC_API_KEY
-        │   └── LD_PRELOAD routes ALL children to User Context
+    └── User Commands (EACH wrapped in isolation)
+        ├── Platform Context Commands
+        │   └── unshare --pid --fork --mount-proc bash -c 'command'
+        │       ├── Cannot see control plane ✅
+        │       ├── Has ANTHROPIC_API_KEY
+        │       └── LD_PRELOAD routes children to User Context
         │
-        └── User Context  
-            ├── All AI agent children run here
-            ├── Has CLOUDFLARE_API_TOKEN, AWS_KEY
-            └── Never sees platform credentials
+        └── User Context Commands
+            └── unshare --pid --fork --mount-proc bash -c 'command'
+                ├── Cannot see control plane ✅
+                ├── Has CLOUDFLARE_API_TOKEN, AWS_KEY
+                └── Completely isolated from platform
 ```
 
-### Simplified Isolation Strategy
+### The Key Change: Where Isolation Happens
 
-Since we're already inside Firecracker+Docker, we only need:
+Instead of wrapping the control plane startup:
+```bash
+# WRONG - Don't do this!
+unshare --pid bash -c 'jupyter & bun &'
+```
 
-1. **Control Plane Protection**: Simple `unshare --pid` to hide Bun/Jupyter
-2. **Credential Routing**: LD_PRELOAD universal routing for AI agent children
-3. **Session State**: Persistent shell process per context
+We wrap EACH user command:
+```bash
+# CORRECT - Isolate user commands!
+unshare --pid --fork --mount-proc bash -c 'user_command'
+```
 
-No complex namespace management needed - we leverage existing container isolation.
+This ensures user commands can't see or kill the control plane!
 
 #### Our Key Innovation: Universal Routing via LD_PRELOAD
 

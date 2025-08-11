@@ -509,42 +509,101 @@ char* getenv(const char* name) {
 
 
 
-## Implementation Approach
+## Implementation Approach - CRITICAL UPDATE
 
-### Why We Don't Need Complex Sandboxing
+### MAJOR ARCHITECTURAL FLAW DISCOVERED
 
-We researched existing sandboxing solutions (Bubblewrap, gVisor, Firejail, etc.) and realized:
-- **We're already strongly isolated** - Firecracker VM + Docker container
-- **We only need control plane protection** - Hide Bun/Jupyter from user code
-- **Credential routing is unique to us** - LD_PRELOAD universal routing
-- **Simplicity wins** - One `unshare` command + contexts + LD_PRELOAD
+After deep analysis and testing, we discovered a **fundamental flaw** in our initial approach:
 
-### Our Minimal Implementation
+#### The Problem: Wrong Isolation Direction
+
+**What we implemented (BROKEN):**
+```bash
+# startup.sh creates isolated namespace for control plane
+unshare --pid --fork --mount-proc bash -c '
+  # Jupyter and Bun run in isolated namespace
+  jupyter server &
+  bun index.ts &
+'
+# BUT: When Bun spawns user commands, they run in HOST namespace!
+# Result: User code CAN see and kill control plane
+```
+
+**Why it's broken:**
+- `unshare` creates namespace A for Jupyter/Bun
+- When Bun uses `spawn()` to execute user commands
+- Those commands inherit the **host container's namespace**, not namespace A
+- Therefore `ps aux` still shows everything!
+
+### The Solution: Inverse Isolation Model
+
+**Correct Architecture:**
+```
+Container Start
+    ├── Control plane runs in DEFAULT namespace (visible)
+    │   ├── Jupyter (normal process)
+    │   └── Bun (normal process)
+    └── User commands wrapped with unshare (isolated)
+            └── Each command in NEW namespace (can't see control plane!)
+```
+
+**Key Insight:** We need to isolate USER CODE, not the control plane!
+
+### Our Corrected Implementation
 
 #### What We Need (Environment-Aware)
 
-1. **Hide Control Plane** (production only):
+1. **Control Plane Runs Normally** (both environments):
 ```bash
-# PRODUCTION: Make Bun/Jupyter invisible
-unshare --pid --fork --mount-proc sh -c '
-  bun serve --port 8080 &
-  jupyter kernel --port 8888 &
-  sleep infinity
-'
-
-# LOCAL DEV: Graceful fallback (visible but functional)
-# Control plane remains visible - avoid pkill commands
+# NO unshare wrapper for control plane
+# Let Jupyter and Bun run in default namespace
+jupyter server --config=/container-server/jupyter_config.py &
+bun index.ts &
 ```
 
-2. **Context Management** (works in both environments):
+2. **Isolate User Commands with Persistent Sessions** (production only):
+```typescript
+// In utils/context.ts - OPTION 3: Persistent Namespace Sessions
+class ExecutionContext {
+  private persistentNamespace?: ChildProcess;
+  
+  async initialize() {
+    if (this.persistent && hasCapSysAdmin) {
+      // Create ONE isolated namespace for this context
+      // ALL commands share this namespace (maintains state!)
+      this.persistentNamespace = spawn('unshare', [
+        '--pid',        // Hide control plane
+        '--fork',       // Fork before exec
+        '--mount-proc', // Separate /proc
+        'bash'          // Interactive session
+      ], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: this.env
+      });
+    }
+  }
+  
+  async exec(command: string) {
+    if (this.persistentNamespace) {
+      // Send to persistent namespace (maintains pwd, env, processes)
+      this.persistentNamespace.stdin.write(`${command}\n`);
+      return this.readOutput();
+    }
+    // Fallback for stateless or local dev
+    return spawn(command, { env: this.env });
+  }
+}
+```
+
+3. **Context Management** (works in both environments):
 - Platform context: Has ANTHROPIC_API_KEY
 - User context: Has CLOUDFLARE_API_TOKEN, AWS_KEY
-- Credential isolation via contexts (not global env)
+- Each context runs in appropriate namespace
 
-3. **Universal Routing** (LD_PRELOAD - both environments):
+4. **Universal Routing** (LD_PRELOAD - both environments):
 - Route ALL AI agent children to user context
 - No pattern matching - everything routes
-- Works regardless of control plane visibility
+- Works with corrected isolation model
 
 ## Security Checklist
 

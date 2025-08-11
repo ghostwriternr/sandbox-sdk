@@ -450,9 +450,9 @@ try {
         
         // Test 4: Port protection (test with non-conflicting ports)
         try {
-          // Try to bind to various ports - avoiding Jupyter (8888) and Bun (3000)
-          const port9001 = await sandbox.startProcess('python3 -m http.server 9001');
-          const port9002 = await sandbox.startProcess('python3 -m http.server 9002');
+          // Try to bind to various ports with explicit bind address
+          const port9001 = await sandbox.startProcess('python3 -m http.server 9001 --bind 0.0.0.0');
+          const port9002 = await sandbox.startProcess('python3 -m http.server 9002 --bind 0.0.0.0');
           
           // Wait a bit longer for Python servers to start
           await new Promise(resolve => setTimeout(resolve, 2000));
