@@ -315,11 +315,11 @@ try {
                 : "✅ Protected",
               isVulnerable: checkExposure.stdout.includes('EXPOSED_SECRET')
             });
-          } catch (error: any) {
+          } catch (error) {
             tests.push({
               test: "Current: setEnvVars() exposure",
               result: "✅ Method removed (good!)",
-              error: error.message
+              error: error instanceof Error ? error.message : String(error)
             });
           }
         }
@@ -376,13 +376,14 @@ try {
             result: crossCheck.stdout.includes('sk-ant') ? "❌ LEAKED!" : "✅ ISOLATED",
             output: crossCheck.stdout.trim() || "(empty - good!)"
           });
-        } catch (error: any) {
+        } catch (error) {
           tests.push({
             test: "Basic isolation",
             result: "❌ Error",
-            error: error.message
+            error: error instanceof Error ? error.message : String(error)
           });
         }
+        } // End of if (hasContexts)
         
         // Test 2: Control plane hiding (will work after implementation)
         try {
@@ -410,11 +411,11 @@ try {
             });
           }
           
-        } catch (error: any) {
+        } catch (error) {
           tests.push({
             test: "Process isolation",
             result: "❌ Error",
-            error: error.message
+            error: error instanceof Error ? error.message : String(error)
           });
         }
         
@@ -439,40 +440,82 @@ try {
             });
           }
           
-        } catch (error: any) {
+        } catch (error) {
           tests.push({
-            test: "File system sharing",
+            test: "Universal routing concept",
             result: "❌ Error",
-            error: error.message
+            error: error instanceof Error ? error.message : String(error)
           });
         }
         
-        // Test 4: Port protection (already working)
+        // Test 4: Port protection (test with non-conflicting ports)
         try {
-          // Try to bind to control plane ports
-          const port8080 = await sandbox.exec('python3 -m http.server 8080 2>&1 &');
-          const port8888 = await sandbox.exec('python3 -m http.server 8888 2>&1 &');
+          // Try to bind to various ports - avoiding Jupyter (8888) and Bun (3000)
+          const port9001 = await sandbox.startProcess('python3 -m http.server 9001');
+          const port9002 = await sandbox.startProcess('python3 -m http.server 9002');
           
-          // Wait a moment for binding attempts
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          // Wait a bit longer for Python servers to start
+          await new Promise(resolve => setTimeout(resolve, 2000));
           
-          const check8080 = await sandbox.exec('lsof -i :8080 | grep python');
-          const check8888 = await sandbox.exec('lsof -i :8888 | grep python');
+          // Check if the processes are still running
+          const proc9001Status = await sandbox.getProcess(port9001.id);
+          const proc9002Status = await sandbox.getProcess(port9002.id);
           
           tests.push({
-            test: "Port 8080 (Bun) protection",
-            result: check8080.stdout ? "❌ USER HIJACKED" : "✅ PROTECTED",
-            details: "Control plane pre-binds ports"
+            test: "Python process 9001 status",
+            result: proc9001Status.status === 'running' ? "✅ Running" : "❌ Not running",
+            details: `Status: ${proc9001Status.status}, PID: ${proc9001Status.pid}`
           });
+          
+          tests.push({
+            test: "Python process 9002 status", 
+            result: proc9002Status.status === 'running' ? "✅ Running" : "❌ Not running",
+            details: `Status: ${proc9002Status.status}, PID: ${proc9002Status.pid}`
+          });
+          
+          // Check if Python managed to bind to the ports
+          const check9001 = await sandbox.exec('lsof -i :9001 | grep python || echo "NOT_BOUND"');
+          const check9002 = await sandbox.exec('lsof -i :9002 | grep python || echo "NOT_BOUND"');
+          
+          tests.push({
+            test: "Port 9001 binding",
+            result: check9001.stdout.includes("python") ? "✅ User can bind available ports" : "❌ Failed to bind",
+            details: "User code should be able to use unreserved ports"
+          });
+          
+          tests.push({
+            test: "Port 9002 binding", 
+            result: check9002.stdout.includes("python") ? "✅ User can bind available ports" : "❌ Failed to bind",
+            details: "User code should be able to use unreserved ports"
+          });
+          
+          // Now test that we CANNOT bind to control plane ports
+          // Note: These should fail to bind because Jupyter/Bun already have them
+          const tryJupyter = await sandbox.exec('python3 -c "import socket; s=socket.socket(); s.bind((\\"\\", 8888))" 2>&1 || echo "EXPECTED_FAIL"');
+          const tryBun = await sandbox.exec('python3 -c "import socket; s=socket.socket(); s.bind((\\"\\", 3000))" 2>&1 || echo "EXPECTED_FAIL"');
           
           tests.push({
             test: "Port 8888 (Jupyter) protection",
-            result: check8888.stdout ? "❌ USER HIJACKED" : "✅ PROTECTED",
-            details: "Control plane pre-binds ports"
+            result: tryJupyter.stdout.includes("EXPECTED_FAIL") || tryJupyter.stdout.includes("Address already in use") ? "✅ PROTECTED" : "❌ NOT PROTECTED",
+            details: "Jupyter port should be protected"
           });
           
-          // Clean up
-          await sandbox.exec('pkill -f "python3 -m http.server" || true');
+          tests.push({
+            test: "Port 3000 (Bun) protection",
+            result: tryBun.stdout.includes("EXPECTED_FAIL") || tryBun.stdout.includes("Address already in use") ? "✅ PROTECTED" : "❌ NOT PROTECTED", 
+            details: "Bun control plane port should be protected"
+          });
+          
+          // Clean up the test processes properly
+          if (port9001.id) await sandbox.killProcess(port9001.id);
+          if (port9002.id) await sandbox.killProcess(port9002.id);
+        } catch (error) {
+          tests.push({
+            test: "Port protection test",
+            result: "❌ Error",
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
         
         // Test 5: Simplified approach benefits
         tests.push({
@@ -485,14 +528,6 @@ try {
             performance: "Minimal overhead (one unshare at startup)"
           }
         });
-          
-        } catch (error: any) {
-          tests.push({
-            test: "Performance benchmark",
-            result: "❌ Error",
-            error: error.message
-          });
-        }
         
         // Summary
         const passed = tests.filter(t => t.result?.toString().includes('✅')).length;
@@ -534,16 +569,17 @@ try {
           headers: { "content-type": "application/json" },
           status: 200  // Always 200 for test results
         });
-      }
+      }  // End of /test-simplified
 
       return new Response(
         "Unknown path. Try: /test-capabilities, /test-isolation, /test-processes, or /test-simplified",
         { status: 404 }
       );
 
-    } catch (error: any) {
+    } catch (error) {
       console.error("Error:", error);
-      return new Response(`Error: ${error.message}`, { 
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      return new Response(`Error: ${errorMessage}`, { 
         status: 500,
         headers: { "content-type": "text/plain" }
       });

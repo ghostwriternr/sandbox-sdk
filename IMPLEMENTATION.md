@@ -506,32 +506,60 @@ export class UniversalRouter {
 }
 ```
 
-## Implementation Timeline
+## Implementation Status
 
-### Week 1: Minimal Implementation
-**Goal**: Hide control plane + credential routing (leveraging existing isolation)
+### ✅ Completed Components
 
-1. **Day 1**: Control plane hiding (1 hour!)
-   - One `unshare --pid` command at startup
-   - Verify Bun/Jupyter invisible to user code
-   - Done - that's all for control plane protection!
-   
-2. **Day 2**: Context-based credentials
-   - Simple context management in bun server
-   - Platform context vs user context
-   - Credential separation without complex namespaces
-   
-3. **Day 3**: LD_PRELOAD universal routing
-   - Simple interceptor (no pattern matching)
-   - Route ALL AI children to user context
-   - Test with real AI agents
-   
-4. **Day 4-5**: Integration & testing
-   - Verify with Claude Code
-   - Confirm credential isolation
-   - Document simplified approach
+1. **Environment Capability Detection** (`utils/capabilities.ts`)
+   - Detects CAP_SYS_ADMIN availability
+   - Distinguishes production vs local development
+   - Provides graceful fallback strategy
 
-**Why so simple?** We're already inside Firecracker+Docker - we just need to hide control plane and route credentials!
+2. **ExecutionContext Class** (`utils/context.ts`)
+   - Manages isolated credential contexts
+   - Supports persistent shell sessions
+   - Implements child context routing
+   - Handles AI agent detection
+
+3. **Context Management API** (`api/context.ts`)
+   - ContextManager for centralized management
+   - Create, list, destroy contexts
+   - Execute commands in specific contexts
+   - Default context initialization
+
+4. **LD_PRELOAD Universal Router** 
+   - C interceptor (`lib/universal_router.c`)
+   - Routes ALL exec calls based on SANDBOX_ROUTE_TO_CONTEXT
+   - TypeScript daemon (`services/universal-router.ts`)
+   - Unix domain socket communication
+
+5. **Container Integration** (`index.ts`, `handler/security-context.ts`)
+   - Security context API endpoints
+   - Initialization on container startup
+   - Integrated with existing infrastructure
+
+6. **SDK Client Methods** (`src/sandbox.ts`, `src/security-context-types.ts`)
+   - Type-safe context creation and management
+   - Proper TypeScript types throughout
+   - Clean API surface for developers
+
+7. **Startup Integration** (`startup.sh`)
+   - Compiles LD_PRELOAD interceptor on startup
+   - Graceful handling of compilation failures
+
+### 🚧 Pending/Future Work
+
+1. **Control Plane Hiding**
+   - The `unshare --pid` implementation needs to be added to container startup
+   - Currently detection is in place but actual hiding not yet executed
+
+2. **Production Testing**
+   - Need to test in actual Cloudflare environment with CAP_SYS_ADMIN
+   - Verify control plane hiding works as expected
+
+3. **Universal Router Daemon**
+   - Need to start the routing daemon in container initialization
+   - Wire up with the compiled LD_PRELOAD library
 
 ### Week 2: SDK Integration
 **Goal**: Update SDK client with new behavior

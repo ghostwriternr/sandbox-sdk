@@ -1,9 +1,13 @@
 import { randomBytes } from "node:crypto";
+import { spawn } from "node:child_process";
 import { serve } from "bun";
 import {
   handleExecuteRequest,
   handleStreamingExecuteRequest,
 } from "./handler/exec";
+import { detectCapabilities, IsolationStrategy } from "./utils/capabilities";
+import { ContextManager } from "./api/context";
+import { UniversalRouter } from "./services/universal-router";
 import {
   handleDeleteFileRequest,
   handleMkdirRequest,
@@ -13,6 +17,12 @@ import {
   handleWriteFileRequest,
 } from "./handler/file";
 import { handleGitCheckoutRequest } from "./handler/git";
+import {
+  handleCreateSecurityContext,
+  handleExecInContext,
+  handleListSecurityContexts,
+  handleHasSecurityContext
+} from "./handler/security-context";
 import {
   handleExposePortRequest,
   handleGetExposedPortsRequest,
@@ -41,6 +51,9 @@ const exposedPorts = new Map<number, { name?: string; exposedAt: Date }>();
 // In-memory process storage - cleared on container restart
 const processes = new Map<string, ProcessRecord>();
 
+// Context manager for credential isolation
+const contextManager = new ContextManager();
+
 // Generate a unique session ID using cryptographically secure randomness
 function generateSessionId(): string {
   return `session_${Date.now()}_${randomBytes(6).toString("hex")}`;
@@ -59,6 +72,50 @@ function cleanupOldSessions() {
 
 // Run cleanup every 10 minutes
 setInterval(cleanupOldSessions, 10 * 60 * 1000);
+
+// Initialize isolation and control plane hiding
+let isolationStrategy: IsolationStrategy;
+let universalRouter: UniversalRouter;
+
+async function initializeIsolation() {
+  console.log("[Container] Detecting environment capabilities...");
+  const capabilities = await detectCapabilities();
+  isolationStrategy = new IsolationStrategy(capabilities);
+  
+  console.log(`[Container] Environment: ${capabilities.mode}`);
+  console.log(`[Container] CAP_SYS_ADMIN: ${capabilities.hasCapSysAdmin}`);
+  
+  // Hide control plane if in production
+  const hideResult = await isolationStrategy.hideControlPlane();
+  console.log(`[Container] Control plane: ${hideResult.message}`);
+  
+  // Create default context
+  await contextManager.createContext({
+    name: 'default',
+    env: {},
+    cwd: '/workspace',
+    persistent: true
+  });
+  console.log("[Container] Default context created");
+  
+  // Start the universal routing daemon
+  try {
+    // Compile the LD_PRELOAD interceptor
+    await UniversalRouter.compileInterceptor();
+    
+    // Start the routing daemon
+    universalRouter = new UniversalRouter(contextManager.contexts);
+    await universalRouter.initialize();
+    console.log("[Container] Universal router initialized");
+  } catch (err) {
+    console.error("[Container] Failed to initialize universal router:", err);
+  }
+}
+
+// Initialize isolation immediately
+initializeIsolation().catch(err => {
+  console.error("[Container] Failed to initialize isolation:", err);
+});
 
 // Initialize Jupyter service with graceful degradation
 const jupyterService = new JupyterService();
@@ -316,6 +373,26 @@ const server = serve({
           break;
 
         // Code interpreter endpoints
+        // Security context endpoints (our simplified approach)
+        case "/api/security/context/create":
+          if (req.method === "POST") {
+            return handleCreateSecurityContext(contextManager, req, corsHeaders);
+          }
+          break;
+        
+        case "/api/security/context/exec":
+          if (req.method === "POST") {
+            return handleExecInContext(contextManager, req, corsHeaders);
+          }
+          break;
+        
+        case "/api/security/context/list":
+          if (req.method === "GET") {
+            return handleListSecurityContexts(contextManager, req, corsHeaders);
+          }
+          break;
+        
+        // Jupyter contexts (for code execution)
         case "/api/contexts":
           if (req.method === "POST") {
             try {
@@ -544,6 +621,14 @@ const server = serve({
                   }
                 );
               }
+            }
+          }
+
+          // Handle dynamic routes for security contexts
+          if (pathname.startsWith("/api/security/context/has/")) {
+            const contextName = pathname.split("/").pop();
+            if (contextName && req.method === "GET") {
+              return handleHasSecurityContext(contextManager, contextName, corsHeaders);
             }
           }
 

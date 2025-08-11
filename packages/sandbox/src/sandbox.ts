@@ -25,6 +25,18 @@ import type {
   StreamOptions,
 } from "./types";
 import { ProcessNotFoundError, SandboxError } from "./types";
+import type {
+  SecurityContext,
+  SecurityContextOptions,
+  SecurityContextResponse,
+  SecurityContextExecRequest,
+  SecurityContextExecResponse,
+  SecurityContextListResponse,
+  SecurityContextExistsResponse,
+  SecurityErrorResponse,
+  SecurityContextExecOptions,
+  SecurityContextExecResult
+} from "./security-context-types";
 
 export function getSandbox(ns: DurableObjectNamespace<Sandbox>, id: string) {
   const stub = getContainer(ns, id);
@@ -774,5 +786,148 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
    */
   async deleteCodeContext(contextId: string): Promise<void> {
     return this.codeInterpreter.deleteCodeContext(contextId);
+  }
+
+  // Security Context Methods (Simplified Approach)
+
+  /**
+   * Create a security context with isolated credentials
+   */
+  async createContext(options: SecurityContextOptions): Promise<SecurityContext> {
+    const response = await this.containerFetch(
+      new Request("http://localhost:3000/api/security/context/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options),
+      })
+    );
+
+    if (!response.ok) {
+      const error = await response.json() as SecurityErrorResponse;
+      throw new SandboxError(
+        `Failed to create security context: ${error.error || response.statusText}`
+      );
+    }
+
+    const result = await response.json() as SecurityContextResponse;
+    
+    // Return a context proxy object
+    const context: SecurityContext = {
+      name: options.name,
+      exec: async (command: string, execOptions?: SecurityContextExecOptions) => {
+        return this.execInContext(options.name, command, execOptions);
+      },
+      setEnv: async (vars: Record<string, string>) => {
+        // Context environment is immutable after creation in our simplified approach
+        throw new Error("Context environment cannot be changed after creation. Create a new context instead.");
+      },
+      cd: async (path: string) => {
+        return this.execInContext(options.name, `cd ${path}`, {});
+      },
+      pwd: async () => {
+        const result = await this.execInContext(options.name, "pwd", {});
+        return result.stdout.trim();
+      }
+    };
+    return context;
+  }
+
+  /**
+   * Execute a command in a specific security context
+   */
+  async execInContext(
+    contextName: string,
+    command: string,
+    options?: SecurityContextExecOptions
+  ): Promise<SecurityContextExecResult> {
+    const response = await this.containerFetch(
+      new Request("http://localhost:3000/api/security/context/exec", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          context: contextName,
+          command: command,
+          options: options
+        }),
+      })
+    );
+
+    if (!response.ok) {
+      const error = await response.json() as SecurityErrorResponse;
+      throw new SandboxError(
+        `Failed to execute in context: ${error.error || response.statusText}`
+      );
+    }
+
+    const result = await response.json() as SecurityContextExecResponse;
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+      success: result.exitCode === 0,
+      command: command,
+      duration: 0,
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  /**
+   * Check if a security context exists
+   */
+  async hasContext(name: string): Promise<boolean> {
+    const response = await this.containerFetch(
+      new Request(`http://localhost:3000/api/security/context/has/${name}`, {
+        method: "GET",
+      })
+    );
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const result = await response.json() as SecurityContextExistsResponse;
+    return result.exists;
+  }
+
+  /**
+   * List all security contexts
+   */
+  async listContexts(): Promise<string[]> {
+    const response = await this.containerFetch(
+      new Request("http://localhost:3000/api/security/context/list", {
+        method: "GET",
+      })
+    );
+
+    if (!response.ok) {
+      throw new SandboxError(
+        `Failed to list contexts: ${response.statusText}`
+      );
+    }
+
+    const result = await response.json() as SecurityContextListResponse;
+    return result.contexts;
+  }
+
+  /**
+   * Get a context reference by name
+   */
+  context(name: string): SecurityContext {
+    return {
+      name: name,
+      exec: async (command: string, options?: SecurityContextExecOptions) => {
+        return this.execInContext(name, command, options);
+      },
+      setEnv: async (vars: Record<string, string>) => {
+        throw new Error("Context environment cannot be changed after creation. Create a new context instead.");
+      },
+      cd: async (path: string) => {
+        return this.execInContext(name, `cd ${path}`, {});
+      },
+      pwd: async () => {
+        const result = await this.execInContext(name, "pwd", {});
+        return result.stdout.trim();
+      }
+    };
   }
 }
