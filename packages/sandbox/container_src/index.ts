@@ -4,7 +4,7 @@ import {
   handleExecuteRequest,
   handleStreamingExecuteRequest,
 } from "./handler/exec";
-import { SimpleSessionManager } from "./utils/simple-isolation";
+import { SessionManager } from "./utils/isolation";
 import {
   handleDeleteFileRequest,
   handleListFilesRequest,
@@ -40,14 +40,14 @@ const exposedPorts = new Map<number, { name?: string; exposedAt: Date }>();
 // In-memory process storage - cleared on container restart
 const processes = new Map<string, ProcessRecord>();
 
-import { hasNamespaceSupport } from "./utils/simple-isolation";
+import { hasNamespaceSupport } from "./utils/isolation";
 
 // Check isolation capabilities on startup
 const isolationAvailable = hasNamespaceSupport();
 console.log(`[Container] Process isolation: ${isolationAvailable ? 'ENABLED (production mode)' : 'DISABLED (development mode)'}`);
 
 // Session manager for secure execution with isolation
-const sessionManager = new SimpleSessionManager();
+const sessionManager = new SessionManager();
 
 // Note: Default session will be created lazily on first use
 // to avoid initialization loops

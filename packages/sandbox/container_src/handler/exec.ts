@@ -1,6 +1,6 @@
 import { type SpawnOptions, spawn } from "node:child_process";
 import type { ExecuteOptions, ExecuteRequest } from "../types";
-import type { SimpleSessionManager } from "../utils/simple-isolation";
+import type { SessionManager } from "../utils/isolation";
 
 function executeCommand(
   command: string,
@@ -81,7 +81,7 @@ function executeCommand(
 export async function handleExecuteRequest(
   req: Request,
   corsHeaders: Record<string, string>,
-  sessionManager?: SimpleSessionManager
+  sessionManager?: SessionManager
 ): Promise<Response> {
   try {
     const body = (await req.json()) as ExecuteRequest;
