@@ -127,7 +127,7 @@ export async function handleExecuteRequest(
       } catch (error) {
         // Log security fallback prominently
         console.warn("[Exec] WARNING: SESSION ISOLATION FAILED - Falling back to regular execution");
-        console.warn("[Exec] WARNING: This may expose control plane processes to user commands");
+        console.warn("[Exec] WARNING: This may expose control plane processes to sandboxed commands");
         console.error("[Exec] Session execution error:", error);
         
         // Fallback to regular execution - but make it clear this is a degraded state

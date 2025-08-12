@@ -1,55 +1,29 @@
 /**
- * Session-based Isolation for Cloudflare Sandbox
+ * Process Isolation
  * 
- * ## Problem Solved
- * Three critical security issues in the sandbox:
- * 1. Process Visibility: User commands could see/kill control plane (Jupyter/Bun)
- * 2. Port Hijacking: User could steal ports meant for control plane
- * 3. Credential Exposure: Platform secrets visible via /proc filesystem
- * 
- * ## Solution: Inverse Isolation Architecture
- * Instead of isolating the control plane (which didn't work because Bun's spawn()
- * inherited parent's namespace), we do the OPPOSITE:
- * - Control plane runs in default namespace
- * - User commands run in isolated PID namespaces
- * - Each session maintains persistent state (pwd, env vars, background processes)
+ * Implements PID namespace isolation to secure the sandbox environment.
+ * Executed commands run in isolated namespaces, preventing them from:
+ * - Seeing or killing control plane processes (Jupyter, Bun)
+ * - Accessing platform secrets in /proc
+ * - Hijacking control plane ports
  * 
  * ## Two-Process Architecture
  * 
- * ┌─────────────────┐
- * │  Node.js Parent │  (Your app)
- * └────────┬────────┘
- *          │ JSON over stdin/stdout
- *          ▼
- * ┌─────────────────┐
- * │ Control Process │  (Node.js - handles IPC, file management)
- * └────────┬────────┘
- *          │ Commands via stdin, files for output
- *          ▼
- * ┌─────────────────┐
- * │  Isolated Shell │  (Bash with unshare --pid)
- * └─────────────────┘
+ * Parent Process (Node.js) → Control Process (Node.js) → Isolated Shell (Bash)
  * 
- * ## Why Two Processes?
- * We tried marker-based parsing (UUID markers in stdout) but it had edge cases:
- * - Binary data corrupted parsing
- * - User could print our markers
- * - Large outputs had buffer issues
- * - Shell death wasn't recoverable
+ * The control process manages the isolated shell and handles all I/O through
+ * temp files instead of stdout/stderr parsing. This approach handles:
+ * - Binary data without corruption
+ * - Large outputs without buffer issues
+ * - Command output that might contain markers
+ * - Clean recovery when shell dies
  * 
- * The two-process model with file-based IPC is bulletproof:
- * - Control process manages all I/O via temp files
- * - Shell never directly connected to parent
- * - Handles ANY output (binary, huge, special chars)
- * - Clean recovery if shell dies
+ * ## Why file-based IPC?
+ * Initial marker-based parsing (UUID markers in stdout) had too many edge cases.
+ * File-based IPC reliably handles any output type.
  * 
- * ## Security Properties Achieved
- * - Control plane processes hidden from user commands
- * - User can't kill Jupyter/Bun servers
- * - User can't steal control ports (8888, 3000)
- * - Platform secrets in /proc/1/environ hidden
- * - Each session fully isolated from others
- * - Graceful fallback in dev (no CAP_SYS_ADMIN)
+ * Requires CAP_SYS_ADMIN capability (available in production).
+ * Falls back to regular execution in development.
  */
 
 import { type ChildProcess, spawn } from 'node:child_process';
@@ -104,13 +78,8 @@ interface ControlResponse {
 let namespaceSupport: boolean | null = null;
 
 /**
- * Check if we can create PID namespaces (requires CAP_SYS_ADMIN capability)
- * 
- * In production: Cloudflare containers have CAP_SYS_ADMIN, isolation works
- * In development: Local Docker usually doesn't, graceful fallback to regular bash
- * 
- * This is why "inverse isolation" is key - if control plane was isolated,
- * dev mode would completely break. With user command isolation, dev still works.
+ * Check if PID namespace isolation is available (requires CAP_SYS_ADMIN).
+ * Returns true in production, false in typical development environments.
  */
 export function hasNamespaceSupport(): boolean {
   if (namespaceSupport !== null) {
@@ -135,8 +104,8 @@ export function hasNamespaceSupport(): boolean {
 }
 
 /**
- * Production-ready session with two-process architecture
- * Control process manages I/O via files, shell maintains state
+ * Session with isolated command execution.
+ * Maintains state across commands within the session.
  */
 export class Session {
   private control: ChildProcess | null = null;
@@ -213,18 +182,12 @@ export class Session {
   }
   
   /**
-   * Generate the control process script dynamically
+   * Generate the control process script that manages the isolated shell.
    * 
-   * Why generate instead of using a separate file?
-   * - Single file deployment (no extra scripts to manage)
-   * - Can inject environment variables at creation time
-   * - Self-contained - all logic visible in one place
-   * 
-   * The control process is the KEY to reliability:
-   * - It's a Node.js process that manages the bash shell
-   * - Handles all IPC via JSON protocol
-   * - Uses temp files for command I/O (bulletproof)
-   * - Detects and recovers from shell death
+   * Generated inline rather than using a separate file to:
+   * - Keep everything in one deployable unit
+   * - Inject environment variables at creation time
+   * - Make the implementation self-contained
    */
   private createControlScript(): string {
     return `
@@ -360,22 +323,10 @@ process.stdin.on('data', async (data) => {
         // Write command to file
         fs.writeFileSync(cmdFile, msg.command, 'utf8');
         
-        // CRITICAL: Use 'source' not 'bash' to maintain shell state!
-        // 
-        // Why 'source' instead of 'bash'?
-        // - 'bash script.sh' creates a NEW subshell (loses pwd, env vars)
-        // - 'source script.sh' runs in CURRENT shell (preserves everything)
-        // 
-        // This enables stateful sessions:
-        //   exec("cd /app")        // Changes directory
-        //   exec("pwd")            // Still in /app!
-        //   exec("export FOO=bar") // Sets env var
-        //   exec("echo $FOO")      // Still has FOO!
-        //
-        // File-based I/O avoids ALL parsing issues:
-        // - Binary data, huge outputs, special chars all work perfectly
-        // - No markers to collide with user output
-        // - Clean temp files, no buffer management
+        // Use 'source' instead of 'bash' to maintain shell state across commands
+        // - 'bash script.sh' creates a subshell (loses pwd, env vars)
+        // - 'source script.sh' runs in current shell (preserves state)
+        // File-based I/O handles any output type (binary, large, special chars)
         const execScript = \`
 # Execute command with output redirection in current shell
 source \${cmdFile} > \${outFile} 2> \${errFile}
@@ -597,18 +548,8 @@ process.stdin.resume();
 }
 
 /**
- * SessionManager - Orchestrates multiple isolated sessions
- * 
- * Key design decisions:
- * 1. Each sandbox gets a 'default' session automatically (implicit sessions)
- * 2. Additional named sessions can be created explicitly
- * 3. Sessions are independent (different pwd, env, processes)
- * 4. All sessions share the filesystem (can exchange files)
- * 
- * Backward compatibility:
- * - Old code using sessionId still works (creates session on demand)
- * - New code gets automatic session with state persistence
- * - Zero breaking changes to existing API
+ * Manages isolated sessions for command execution.
+ * Each session maintains its own state (pwd, env vars, processes).
  */
 export class SessionManager {
   private sessions = new Map<string, Session>();
