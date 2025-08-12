@@ -226,6 +226,38 @@ const isIsolated = process.env.SESSION_ISOLATED === '1';
 
 console.error(\`[Control] Starting control process for session '\${sessionName}'\`);
 
+// Track active command files for cleanup
+const activeFiles = new Set();
+
+// Cleanup function for orphaned temp files
+function cleanupTempFiles() {
+  try {
+    const files = fs.readdirSync('/tmp');
+    const now = Date.now();
+    files.forEach(file => {
+      // Match our temp file pattern and check age
+      if (file.match(/^(cmd|out|err|exit)_[a-f0-9-]+/)) {
+        const filePath = path.join('/tmp', file);
+        try {
+          const stats = fs.statSync(filePath);
+          // Remove files older than 60 seconds that aren't active
+          if (now - stats.mtimeMs > 60000 && !activeFiles.has(filePath)) {
+            fs.unlinkSync(filePath);
+            console.error(\`[Control] Cleaned up orphaned temp file: \${file}\`);
+          }
+        } catch (e) {
+          // File might have been removed already
+        }
+      }
+    });
+  } catch (e) {
+    console.error('[Control] Cleanup error:', e);
+  }
+}
+
+// Run cleanup every 30 seconds
+setInterval(cleanupTempFiles, 30000);
+
 // Start the shell with or without isolation
 const shellCommand = isIsolated
   ? ['unshare', '--pid', '--fork', '--mount-proc', 'bash', '--norc']
@@ -253,11 +285,18 @@ shell.on('error', (error) => {
 shell.on('exit', (code) => {
   console.error(\`[Control] Shell exited with code \${code}\`);
   shellAlive = false;
+  // Clean up any remaining temp files
+  activeFiles.forEach(file => {
+    try { fs.unlinkSync(file); } catch (e) {}
+  });
   process.exit(code || 1);
 });
 
 // Send ready signal
 process.stdout.write(JSON.stringify({ type: 'ready', id: 'init' }) + '\\n');
+
+// Track processing state for each command
+const processingState = new Map();
 
 // Handle commands from parent
 process.stdin.on('data', async (data) => {
@@ -289,6 +328,15 @@ process.stdin.on('data', async (data) => {
         const errFile = \`/tmp/err_\${msg.id}\`;
         const exitFile = \`/tmp/exit_\${msg.id}\`;
         
+        // Track these files as active
+        activeFiles.add(cmdFile);
+        activeFiles.add(outFile);
+        activeFiles.add(errFile);
+        activeFiles.add(exitFile);
+        
+        // Initialize processing state to prevent race conditions
+        processingState.set(msg.id, false);
+        
         // Write command to file
         fs.writeFileSync(cmdFile, msg.command, 'utf8');
         
@@ -317,10 +365,16 @@ echo "DONE:\${msg.id}"
         
         shell.stdin.write(execScript);
         
-        // Set up listener for completion
+        // Set up listener for completion with race condition protection
         const onData = (chunk) => {
           const output = chunk.toString();
           if (output.includes(\`DONE:\${msg.id}\`)) {
+            // Check if already processed (prevents race condition)
+            if (processingState.get(msg.id)) {
+              return;
+            }
+            processingState.set(msg.id, true);
+            
             shell.stdout.off('data', onData);
             
             try {
@@ -339,44 +393,78 @@ echo "DONE:\${msg.id}"
               }) + '\\n');
               
               // Cleanup temp files
-              fs.unlinkSync(cmdFile);
-              fs.unlinkSync(outFile);
-              fs.unlinkSync(errFile);
-              fs.unlinkSync(exitFile);
+              const filesToClean = [cmdFile, outFile, errFile, exitFile];
+              filesToClean.forEach(file => {
+                try {
+                  fs.unlinkSync(file);
+                  activeFiles.delete(file);
+                } catch (e) {
+                  // File might already be deleted
+                }
+              });
+              
+              // Clean up processing state
+              processingState.delete(msg.id);
             } catch (error) {
               process.stdout.write(JSON.stringify({
                 type: 'error',
                 id: msg.id,
                 error: \`Failed to read output: \${error.message}\`
               }) + '\\n');
+              
+              // Still try to clean up files on error
+              [cmdFile, outFile, errFile, exitFile].forEach(file => {
+                try {
+                  fs.unlinkSync(file);
+                  activeFiles.delete(file);
+                } catch (e) {}
+              });
+              processingState.delete(msg.id);
             }
           }
         };
         
         shell.stdout.on('data', onData);
         
-        // Timeout protection
-        setTimeout(() => {
-          shell.stdout.off('data', onData);
-          process.stdout.write(JSON.stringify({
-            type: 'error',
-            id: msg.id,
-            error: 'Command timeout after 30 seconds'
-          }) + '\\n');
-          
-          // Try to cleanup files
-          try {
-            fs.unlinkSync(cmdFile);
-            fs.unlinkSync(outFile);
-            fs.unlinkSync(errFile);
-            fs.unlinkSync(exitFile);
-          } catch (e) {}
+        // Timeout protection with better cleanup
+        const timeoutId = setTimeout(() => {
+          // Check if already processed
+          if (!processingState.get(msg.id)) {
+            processingState.set(msg.id, true);
+            
+            shell.stdout.off('data', onData);
+            process.stdout.write(JSON.stringify({
+              type: 'error',
+              id: msg.id,
+              error: 'Command timeout after 30 seconds'
+            }) + '\\n');
+            
+            // Cleanup files
+            const filesToClean = [cmdFile, outFile, errFile, exitFile];
+            filesToClean.forEach(file => {
+              try {
+                fs.unlinkSync(file);
+                activeFiles.delete(file);
+              } catch (e) {
+                console.error(\`[Control] Failed to cleanup \${file}: \${e.message}\`);
+              }
+            });
+            
+            processingState.delete(msg.id);
+          }
         }, 30000);
       }
     } catch (e) {
       console.error('[Control] Failed to parse command:', e);
     }
   }
+});
+
+// Cleanup on exit
+process.on('exit', () => {
+  activeFiles.forEach(file => {
+    try { fs.unlinkSync(file); } catch (e) {}
+  });
 });
 
 // Keep process alive
@@ -545,5 +633,94 @@ export class SessionManager {
       session.destroy();
     }
     this.sessions.clear();
+  }
+  
+  /**
+   * Verify that isolation is working correctly
+   * Tests if user commands can see control plane processes
+   * 
+   * @returns true if isolation is working (control plane hidden)
+   */
+  async verifyIsolation(): Promise<boolean> {
+    try {
+      // First check if we have namespace support
+      if (!hasNamespaceSupport()) {
+        console.log('[SessionManager] Isolation verification: No namespace support');
+        return false;
+      }
+      
+      // Create a test session with isolation
+      const testSession = await this.createSession({
+        name: 'isolation-test',
+        isolation: true
+      });
+      
+      // Try to see if we can spot control plane processes
+      // We're looking for Bun (port 3000) and Jupyter (port 8888)
+      const tests = [
+        // Check for Bun server process
+        { 
+          cmd: 'ps aux | grep -v grep | grep -c "bun.*3000"',
+          expected: '0',
+          description: 'Bun server visibility'
+        },
+        // Check for Jupyter process
+        { 
+          cmd: 'ps aux | grep -v grep | grep -c "jupyter"',
+          expected: '0',
+          description: 'Jupyter server visibility'
+        },
+        // Check if we can see init process environment (contains secrets)
+        { 
+          cmd: 'cat /proc/1/environ 2>&1 | grep -c "error\\|denied"',
+          expected: '1', // Should get permission denied
+          description: '/proc/1/environ access'
+        },
+        // Check process count (should be minimal in isolated namespace)
+        {
+          cmd: 'ps aux | wc -l',
+          maxValue: 10, // Should see very few processes
+          description: 'Process count in namespace'
+        }
+      ];
+      
+      let allTestsPassed = true;
+      
+      for (const test of tests) {
+        try {
+          const result = await testSession.exec(test.cmd);
+          const output = result.stdout.trim();
+          
+          if (test.expected !== undefined) {
+            const passed = output === test.expected;
+            console.log(`[SessionManager] Isolation test '${test.description}': ${passed ? '✅ PASS' : '❌ FAIL'} (got: ${output}, expected: ${test.expected})`);
+            if (!passed) allTestsPassed = false;
+          } else if (test.maxValue !== undefined) {
+            const value = parseInt(output);
+            const passed = value <= test.maxValue;
+            console.log(`[SessionManager] Isolation test '${test.description}': ${passed ? '✅ PASS' : '❌ FAIL'} (got: ${value}, max: ${test.maxValue})`);
+            if (!passed) allTestsPassed = false;
+          }
+        } catch (error) {
+          console.error(`[SessionManager] Isolation test '${test.description}' error:`, error);
+          allTestsPassed = false;
+        }
+      }
+      
+      // Clean up test session
+      testSession.destroy();
+      this.sessions.delete('isolation-test');
+      
+      if (allTestsPassed) {
+        console.log('[SessionManager] ✅ Isolation verification PASSED - Control plane is properly hidden');
+      } else {
+        console.warn('[SessionManager] ⚠️  Isolation verification FAILED - Control plane may be visible to user commands');
+      }
+      
+      return allTestsPassed;
+    } catch (error) {
+      console.error('[SessionManager] Isolation verification error:', error);
+      return false;
+    }
   }
 }

@@ -54,6 +54,30 @@ const sessionManager = new SessionManager();
 
 // Session cleanup is now handled by SimpleSessionManager
 
+// Graceful shutdown handler
+process.on('SIGTERM', () => {
+  console.log('[Container] SIGTERM received, cleaning up sessions...');
+  sessionManager.destroyAll();
+  setTimeout(() => {
+    process.exit(0);
+  }, 500); // Give sessions time to cleanup
+});
+
+process.on('SIGINT', () => {
+  console.log('[Container] SIGINT received, cleaning up sessions...');
+  sessionManager.destroyAll();
+  setTimeout(() => {
+    process.exit(0);
+  }, 500);
+});
+
+// Cleanup on uncaught exceptions (log but still exit)
+process.on('uncaughtException', (error) => {
+  console.error('[Container] Uncaught exception:', error);
+  sessionManager.destroyAll();
+  process.exit(1);
+});
+
 // Initialize Jupyter service with graceful degradation
 const jupyterService = new JupyterService();
 
@@ -325,6 +349,38 @@ const server = serve({
                 },
               }
             );
+          }
+          break;
+          
+        case "/api/session/verify-isolation":
+          if (req.method === "GET") {
+            try {
+              const isIsolated = await sessionManager.verifyIsolation();
+              return new Response(
+                JSON.stringify({
+                  isolated: isIsolated,
+                  message: isIsolated 
+                    ? "Isolation is working correctly - control plane is hidden from user commands"
+                    : "Isolation is not working - control plane may be visible to user commands",
+                  timestamp: new Date().toISOString(),
+                }),
+                {
+                  headers: {
+                    "Content-Type": "application/json",
+                    ...corsHeaders,
+                  },
+                }
+              );
+            } catch (error) {
+              console.error("[Container] Failed to verify isolation:", error);
+              return new Response(
+                JSON.stringify({ 
+                  error: "Failed to verify isolation",
+                  message: error instanceof Error ? error.message : String(error)
+                }),
+                { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders }}
+              );
+            }
           }
           break;
           

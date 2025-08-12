@@ -131,12 +131,17 @@ export async function handleExecuteRequest(
           success: execResult.exitCode === 0
         };
       } catch (error) {
-        console.error("[Server] Session execution failed:", error);
-        // Fallback to regular execution
+        // Log security fallback prominently
+        console.warn("[Server] ⚠️  SESSION ISOLATION FAILED - Falling back to regular execution");
+        console.warn("[Server] ⚠️  This may expose control plane processes to user commands");
+        console.error("[Server] Session execution error:", error);
+        
+        // Fallback to regular execution - but make it clear this is a degraded state
         result = await executeCommand(command, { sessionId, background, cwd, env });
       }
     } else {
-      // Fallback if session manager not available
+      // Session manager not available - log warning
+      console.warn("[Server] ⚠️  Session manager not available - using regular execution");
       result = await executeCommand(command, { sessionId, background, cwd, env });
     }
 
