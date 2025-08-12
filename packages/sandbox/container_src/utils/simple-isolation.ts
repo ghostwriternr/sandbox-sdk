@@ -299,7 +299,11 @@ export class SimpleSessionManager {
   async exec(command: string): Promise<ExecResult> {
     let defaultSession = this.sessions.get('default');
     if (!defaultSession) {
-      defaultSession = await this.createSession({ name: 'default' });
+      // Default session should also use isolation when available
+      defaultSession = await this.createSession({ 
+        name: 'default',
+        isolation: true 
+      });
     }
     return defaultSession.exec(command);
   }
