@@ -27,7 +27,6 @@ function executeMkdir(
             stdio: ["pipe", "pipe", "pipe"],
         });
 
-        // Process reference is now handled by SimpleSessionManager
 
         let stdout = "";
         let stderr = "";
@@ -41,7 +40,6 @@ function executeMkdir(
         });
 
         mkdirChild.on("close", (code) => {
-            // Process cleanup is now handled by SimpleSessionManager
 
             if (code === 0) {
                 console.log(`[Server] Directory created successfully: ${path}`);
@@ -65,7 +63,6 @@ function executeMkdir(
         });
 
         mkdirChild.on("error", (error) => {
-            // Process cleanup is now handled by SimpleSessionManager
 
             console.error(`[Server] Error creating directory: ${path}`, error);
             reject(error);

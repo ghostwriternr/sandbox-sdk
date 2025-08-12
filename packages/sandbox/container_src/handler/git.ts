@@ -23,7 +23,6 @@ function executeGitCheckout(
       }
     );
 
-    // Process reference is now handled by SimpleSessionManager
 
     let stdout = "";
     let stderr = "";
@@ -37,7 +36,6 @@ function executeGitCheckout(
     });
 
     cloneChild.on("close", (code) => {
-      // Process cleanup is now handled by SimpleSessionManager
 
       if (code === 0) {
         console.log(
@@ -63,7 +61,6 @@ function executeGitCheckout(
     });
 
     cloneChild.on("error", (error) => {
-      // Process cleanup is now handled by SimpleSessionManager
 
       console.error(`[Server] Error cloning repository: ${repoUrl}`, error);
       reject(error);

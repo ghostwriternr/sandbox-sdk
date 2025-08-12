@@ -18,8 +18,6 @@ function executeCommand(
 
     const child = spawn(command, spawnOptions);
 
-    // Process reference is now handled by SimpleSessionManager
-
     let stdout = "";
     let stderr = "";
 
@@ -47,15 +45,13 @@ function executeCommand(
 
       // Still handle errors
       child.on("error", (error) => {
-        console.error(`[Server] Background process error: ${command}`, error);
+        console.error(`[Exec] Background process error: ${command}`, error);
         // Don't reject since we might have already resolved
       });
     } else {
       // Normal synchronous execution
       child.on("close", (code) => {
-        // Process cleanup is now handled by SimpleSessionManager
-
-        console.log(`[Server] Command completed: ${command}, Exit code: ${code}`);
+        console.log(`[Exec] Command completed: ${command}, Exit code: ${code}`);
 
         resolve({
           exitCode: code || 0,
@@ -66,8 +62,6 @@ function executeCommand(
       });
 
       child.on("error", (error) => {
-        // Process cleanup is now handled by SimpleSessionManager
-
         reject(error);
       });
     }
@@ -98,7 +92,7 @@ export async function handleExecuteRequest(
       );
     }
 
-    console.log(`[Server] Executing command: ${command}`);
+    console.log(`[Exec] Executing command: ${command}`);
 
     // ALWAYS use session manager for isolation (implicit sessions)
     let result: Omit<ExecuteResponse, 'command' | 'timestamp'>;
@@ -132,16 +126,16 @@ export async function handleExecuteRequest(
         };
       } catch (error) {
         // Log security fallback prominently
-        console.warn("[Server] ⚠️  SESSION ISOLATION FAILED - Falling back to regular execution");
-        console.warn("[Server] ⚠️  This may expose control plane processes to user commands");
-        console.error("[Server] Session execution error:", error);
+        console.warn("[Exec] WARNING: SESSION ISOLATION FAILED - Falling back to regular execution");
+        console.warn("[Exec] WARNING: This may expose control plane processes to user commands");
+        console.error("[Exec] Session execution error:", error);
         
         // Fallback to regular execution - but make it clear this is a degraded state
         result = await executeCommand(command, { sessionId, background, cwd, env });
       }
     } else {
       // Session manager not available - log warning
-      console.warn("[Server] ⚠️  Session manager not available - using regular execution");
+      console.warn("[Exec] WARNING: Session manager not available - using regular execution");
       result = await executeCommand(command, { sessionId, background, cwd, env });
     }
 
@@ -162,7 +156,7 @@ export async function handleExecuteRequest(
       }
     );
   } catch (error) {
-    console.error("[Server] Error in handleExecuteRequest:", error);
+    console.error("[Exec] Error in handleExecuteRequest:", error);
     return new Response(
       JSON.stringify({
         error: "Failed to execute command",
@@ -203,7 +197,7 @@ export async function handleStreamingExecuteRequest(
     }
 
     console.log(
-      `[Server] Executing streaming command: ${command}`
+      `[Exec] Executing streaming command: ${command}`
     );
 
     const stream = new ReadableStream({
@@ -217,8 +211,6 @@ export async function handleStreamingExecuteRequest(
         };
 
         const child = spawn(command, spawnOptions);
-
-        // Process reference is now handled by SimpleSessionManager
 
         // For background processes, unref to prevent blocking
         if (background) {
@@ -275,10 +267,8 @@ export async function handleStreamingExecuteRequest(
         });
 
         child.on("close", (code) => {
-          // Process cleanup is now handled by SimpleSessionManager
-
           console.log(
-            `[Server] Command completed: ${command}, Exit code: ${code}`
+            `[Exec] Command completed: ${command}, Exit code: ${code}`
           );
 
           // Send command completion event
@@ -309,8 +299,6 @@ export async function handleStreamingExecuteRequest(
         });
 
         child.on("error", (error) => {
-          // Process cleanup is now handled by SimpleSessionManager
-
           controller.enqueue(
             new TextEncoder().encode(
               `data: ${JSON.stringify({
@@ -336,7 +324,7 @@ export async function handleStreamingExecuteRequest(
       },
     });
   } catch (error) {
-    console.error("[Server] Error in handleStreamingExecuteRequest:", error);
+    console.error("[Exec] Error in handleStreamingExecuteRequest:", error);
     return new Response(
       JSON.stringify({
         error: "Failed to execute streaming command",

@@ -31,7 +31,7 @@ import {
 } from "./handler/process";
 import type { CreateContextRequest } from "./jupyter-server";
 import { JupyterNotReadyError, JupyterService } from "./jupyter-service";
-import type { ProcessRecord } from "./types";
+import type { ProcessRecord, CreateSessionRequest, SessionExecRequest } from "./types";
 import { SessionManager } from "./utils/isolation";
 
 // In-memory storage for exposed ports
@@ -52,15 +52,15 @@ const sessionManager = new SessionManager();
 // Note: Default session will be created lazily on first use
 // to avoid initialization loops
 
-// Session cleanup is now handled by SimpleSessionManager
+// Graceful shutdown handler  
+const SHUTDOWN_GRACE_PERIOD_MS = 500; // Grace period for cleanup
 
-// Graceful shutdown handler
 process.on('SIGTERM', () => {
   console.log('[Container] SIGTERM received, cleaning up sessions...');
   sessionManager.destroyAll();
   setTimeout(() => {
     process.exit(0);
-  }, 500); // Give sessions time to cleanup
+  }, SHUTDOWN_GRACE_PERIOD_MS);
 });
 
 process.on('SIGINT', () => {
@@ -68,7 +68,7 @@ process.on('SIGINT', () => {
   sessionManager.destroyAll();
   setTimeout(() => {
     process.exit(0);
-  }, 500);
+  }, SHUTDOWN_GRACE_PERIOD_MS);
 });
 
 // Cleanup on uncaught exceptions (log but still exit)
@@ -292,7 +292,7 @@ const server = serve({
         case "/api/session/create":
           if (req.method === "POST") {
             try {
-              const body = await req.json() as any;
+              const body = await req.json() as CreateSessionRequest;
               const { name, env, cwd, isolation } = body;
               
               if (!name) {
@@ -355,7 +355,7 @@ const server = serve({
         case "/api/session/exec":
           if (req.method === "POST") {
             try {
-              const body = await req.json() as any;
+              const body = await req.json() as SessionExecRequest;
               const { name, command } = body;
               
               console.log(`[Container] Session exec request for '${name}': ${command}`);

@@ -44,18 +44,32 @@
  * - Clean recovery if shell dies
  * 
  * ## Security Properties Achieved
- * ✅ Control plane processes hidden from user commands
- * ✅ User can't kill Jupyter/Bun servers
- * ✅ User can't steal control ports (8888, 3000)
- * ✅ Platform secrets in /proc/1/environ hidden
- * ✅ Each session fully isolated from others
- * ✅ Graceful fallback in dev (no CAP_SYS_ADMIN)
+ * - Control plane processes hidden from user commands
+ * - User can't kill Jupyter/Bun servers
+ * - User can't steal control ports (8888, 3000)
+ * - Platform secrets in /proc/1/environ hidden
+ * - Each session fully isolated from others
+ * - Graceful fallback in dev (no CAP_SYS_ADMIN)
  */
 
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
+
+// Configuration constants
+const CONFIG = {
+  // Timeouts (in milliseconds)
+  COMMAND_TIMEOUT_MS: 30000,        // 30 seconds for command execution
+  READY_TIMEOUT_MS: 5000,           // 5 seconds for control process to initialize
+  CLEANUP_INTERVAL_MS: 30000,       // Run cleanup every 30 seconds
+  TEMP_FILE_MAX_AGE_MS: 60000,      // Delete temp files older than 60 seconds
+  SHUTDOWN_GRACE_PERIOD_MS: 500,    // Grace period for cleanup on shutdown
+  
+  // Default paths
+  DEFAULT_CWD: '/workspace',
+  TEMP_DIR: '/tmp'
+} as const;
 
 // Types
 export interface ExecResult {
@@ -145,7 +159,7 @@ export class Session {
     const controlScript = this.createControlScript();
     
     // Write control script to temp file
-    const scriptPath = `/tmp/control_${randomUUID()}.js`;
+    const scriptPath = `${CONFIG.TEMP_DIR}/control_${randomUUID()}.js`;
     await fs.writeFile(scriptPath, controlScript, 'utf8');
     
     // Start control process
@@ -154,7 +168,7 @@ export class Session {
       env: {
         ...process.env,
         SESSION_NAME: this.options.name,
-        SESSION_CWD: this.options.cwd || '/workspace',
+        SESSION_CWD: this.options.cwd || CONFIG.DEFAULT_CWD,
         SESSION_ISOLATED: this.canIsolate ? '1' : '0',
         ...this.options.env
       }
@@ -221,8 +235,14 @@ const crypto = require('crypto');
 
 // Parse environment
 const sessionName = process.env.SESSION_NAME || 'default';
-const sessionCwd = process.env.SESSION_CWD || '/workspace';
+const sessionCwd = process.env.SESSION_CWD || '${CONFIG.DEFAULT_CWD}';
 const isIsolated = process.env.SESSION_ISOLATED === '1';
+
+// Configuration
+const COMMAND_TIMEOUT_MS = ${CONFIG.COMMAND_TIMEOUT_MS};
+const CLEANUP_INTERVAL_MS = ${CONFIG.CLEANUP_INTERVAL_MS};
+const TEMP_FILE_MAX_AGE_MS = ${CONFIG.TEMP_FILE_MAX_AGE_MS};
+const TEMP_DIR = '${CONFIG.TEMP_DIR}';
 
 console.error(\`[Control] Starting control process for session '\${sessionName}'\`);
 
@@ -232,16 +252,16 @@ const activeFiles = new Set();
 // Cleanup function for orphaned temp files
 function cleanupTempFiles() {
   try {
-    const files = fs.readdirSync('/tmp');
+    const files = fs.readdirSync(TEMP_DIR);
     const now = Date.now();
     files.forEach(file => {
       // Match our temp file pattern and check age
       if (file.match(/^(cmd|out|err|exit)_[a-f0-9-]+/)) {
-        const filePath = path.join('/tmp', file);
+        const filePath = path.join(TEMP_DIR, file);
         try {
           const stats = fs.statSync(filePath);
-          // Remove files older than 60 seconds that aren't active
-          if (now - stats.mtimeMs > 60000 && !activeFiles.has(filePath)) {
+          // Remove files older than max age that aren't active
+          if (now - stats.mtimeMs > TEMP_FILE_MAX_AGE_MS && !activeFiles.has(filePath)) {
             fs.unlinkSync(filePath);
             console.error(\`[Control] Cleaned up orphaned temp file: \${file}\`);
           }
@@ -255,8 +275,8 @@ function cleanupTempFiles() {
   }
 }
 
-// Run cleanup every 30 seconds
-setInterval(cleanupTempFiles, 30000);
+// Run cleanup periodically
+setInterval(cleanupTempFiles, CLEANUP_INTERVAL_MS);
 
 // Start the shell with or without isolation
 const shellCommand = isIsolated
@@ -323,10 +343,10 @@ process.stdin.on('data', async (data) => {
         }
         
         // Create temp files for this command
-        const cmdFile = \`/tmp/cmd_\${msg.id}.sh\`;
-        const outFile = \`/tmp/out_\${msg.id}\`;
-        const errFile = \`/tmp/err_\${msg.id}\`;
-        const exitFile = \`/tmp/exit_\${msg.id}\`;
+        const cmdFile = \`\${TEMP_DIR}/cmd_\${msg.id}.sh\`;
+        const outFile = \`\${TEMP_DIR}/out_\${msg.id}\`;
+        const errFile = \`\${TEMP_DIR}/err_\${msg.id}\`;
+        const exitFile = \`\${TEMP_DIR}/exit_\${msg.id}\`;
         
         // Track these files as active
         activeFiles.add(cmdFile);
@@ -436,7 +456,7 @@ echo "DONE:\${msg.id}"
             process.stdout.write(JSON.stringify({
               type: 'error',
               id: msg.id,
-              error: 'Command timeout after 30 seconds'
+              error: \`Command timeout after \${COMMAND_TIMEOUT_MS/1000} seconds\`
             }) + '\\n');
             
             // Cleanup files
@@ -452,7 +472,7 @@ echo "DONE:\${msg.id}"
             
             processingState.delete(msg.id);
           }
-        }, 30000);
+        }, COMMAND_TIMEOUT_MS);
       }
     } catch (e) {
       console.error('[Control] Failed to parse command:', e);
@@ -476,7 +496,7 @@ process.stdin.resume();
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new Error('Control process initialization timeout'));
-      }, 5000);
+      }, CONFIG.READY_TIMEOUT_MS);
       
       const checkReady = (msg: ControlResponse) => {
         if (msg.type === 'ready' && msg.id === 'init') {
@@ -547,7 +567,7 @@ process.stdin.resume();
       const timeout = setTimeout(() => {
         this.pendingCallbacks.delete(id);
         reject(new Error(`Command timeout: ${command}`));
-      }, 30000);
+      }, CONFIG.COMMAND_TIMEOUT_MS);
       
       // Store callback
       this.pendingCallbacks.set(id, { resolve, reject, timeout });
