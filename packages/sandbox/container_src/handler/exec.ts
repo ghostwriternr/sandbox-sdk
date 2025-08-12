@@ -1,16 +1,12 @@
 import { type SpawnOptions, spawn } from "node:child_process";
+import type { ExecuteResponse } from "../../src/types";
 import type { ExecuteOptions, ExecuteRequest } from "../types";
 import type { SessionManager } from "../utils/isolation";
 
 function executeCommand(
   command: string,
   options: ExecuteOptions,
-): Promise<{
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}> {
+): Promise<Omit<ExecuteResponse, 'command' | 'timestamp'>> {
   return new Promise((resolve, reject) => {
     const spawnOptions: SpawnOptions = {
       shell: true,
@@ -105,7 +101,7 @@ export async function handleExecuteRequest(
     console.log(`[Server] Executing command: ${command}`);
 
     // ALWAYS use session manager for isolation (implicit sessions)
-    let result;
+    let result: Omit<ExecuteResponse, 'command' | 'timestamp'>;
     if (sessionManager) {
       try {
         // Check if we have a session-specific session
@@ -113,7 +109,7 @@ export async function handleExecuteRequest(
         if (sessionId) {
           // Use session-specific session for stateful operations
           sessionName = `session-${sessionId}`;
-          let session = sessionManager.getSession(sessionName);
+          const session = sessionManager.getSession(sessionName);
           if (!session) {
             // Create session on-demand with user's env/cwd
             await sessionManager.createSession({

@@ -849,13 +849,10 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       cwd: options.cwd,
       isolation: options.isolation
     });
-
-    // Return a session object that looks like a sandbox
-    const sandbox = this;
     return {
       name: sessionName,
       exec: async (command: string) => {
-        const result = await sandbox.client.execInSession(sessionName, command);
+        const result = await this.client.execInSession(sessionName, command);
         return {
           ...result,
           command,

@@ -4,7 +4,6 @@ import {
   handleExecuteRequest,
   handleStreamingExecuteRequest,
 } from "./handler/exec";
-import { SessionManager } from "./utils/isolation";
 import {
   handleDeleteFileRequest,
   handleListFilesRequest,
@@ -33,6 +32,7 @@ import {
 import type { CreateContextRequest } from "./jupyter-server";
 import { JupyterNotReadyError, JupyterService } from "./jupyter-service";
 import type { ProcessRecord } from "./types";
+import { SessionManager } from "./utils/isolation";
 
 // In-memory storage for exposed ports
 const exposedPorts = new Map<number, { name?: string; exposedAt: Date }>();

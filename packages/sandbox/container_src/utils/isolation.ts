@@ -52,10 +52,10 @@
  * ✅ Graceful fallback in dev (no CAP_SYS_ADMIN)
  */
 
-import { spawn, type ChildProcess } from 'child_process';
-import { randomUUID } from 'crypto';
-import { promises as fs } from 'fs';
-import * as path from 'path';
+import { type ChildProcess, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
 
 // Types
 export interface ExecResult {
@@ -105,7 +105,7 @@ export function hasNamespaceSupport(): boolean {
   
   try {
     // Actually test if unshare works
-    const { execSync } = require('child_process');
+    const { execSync } = require('node:child_process');
     execSync('unshare --pid --fork --mount-proc true', { 
       stdio: 'ignore',
       timeout: 1000
@@ -466,7 +466,7 @@ process.stdin.resume();
       
       // Send command to control process
       const msg: ControlMessage = { type: 'exec', id, command };
-      this.control!.stdin?.write(JSON.stringify(msg) + '\n');
+      this.control!.stdin?.write(`${JSON.stringify(msg)}\n`);
     });
   }
   
@@ -474,7 +474,7 @@ process.stdin.resume();
     if (this.control) {
       // Send exit command
       const msg: ControlMessage = { type: 'exit', id: 'destroy' };
-      this.control.stdin?.write(JSON.stringify(msg) + '\n');
+      this.control.stdin?.write(`${JSON.stringify(msg)}\n`);
       
       // Give it a moment to exit cleanly
       setTimeout(() => {
