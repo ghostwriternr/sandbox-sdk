@@ -11,9 +11,9 @@ async function createApplication(): Promise<{ fetch: (req: Request) => Promise<R
   // Initialize dependency injection container
   const container = new Container();
   await container.initialize();
-  
+
   // Create and configure router
-  const router = new Router();
+  const router = new Router(logger);
   
   // Add global CORS middleware
   router.use(container.get('corsMiddleware'));

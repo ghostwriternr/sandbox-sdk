@@ -1,7 +1,9 @@
 import type { Logger } from "@repo/shared";
 import { createNoOpLogger } from "@repo/shared";
+import { getHttpStatus } from '@repo/shared/errors';
 import type { ErrorResponse as NewErrorResponse } from '../errors';
 import { createErrorFromResponse, ErrorCode } from '../errors';
+import type { SandboxError } from '../errors/classes';
 import type {
   HttpClientOptions,
   ResponseHandler
@@ -207,10 +209,33 @@ export abstract class BaseHttpClient {
   }
 
   /**
-   * Utility method to log errors
+   * Utility method to log errors intelligently
+   * Only logs unexpected errors (5xx), not expected errors (4xx)
+   *
+   * - 4xx errors (validation, not found, conflicts): Don't log (expected client errors)
+   * - 5xx errors (server failures, internal errors): DO log (unexpected server errors)
    */
   protected logError(operation: string, error: unknown): void {
-    this.logger.error(`Error in ${operation}`, error instanceof Error ? error : new Error(String(error)));
+    // Check if it's a SandboxError with HTTP status
+    if (error && typeof error === 'object' && 'httpStatus' in error) {
+      const httpStatus = (error as SandboxError).httpStatus;
+
+      // Only log server errors (5xx), not client errors (4xx)
+      if (httpStatus >= 500) {
+        this.logger.error(
+          `Unexpected error in ${operation}`,
+          error instanceof Error ? error : new Error(String(error)),
+          { httpStatus }
+        );
+      }
+      // 4xx errors are expected (validation, not found, etc.) - don't log
+    } else {
+      // Non-SandboxError (unexpected) - log it
+      this.logger.error(
+        `Error in ${operation}`,
+        error instanceof Error ? error : new Error(String(error))
+      );
+    }
   }
 
   /**

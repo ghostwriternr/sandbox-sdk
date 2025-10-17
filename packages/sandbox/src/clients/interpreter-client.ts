@@ -181,6 +181,7 @@ export class InterpreterClient extends BaseHttpClient {
       try {
         return await operation();
       } catch (error) {
+        this.logError('executeWithRetry', error);
         lastError = error as Error;
 
         // Check if it's a retryable error (interpreter not ready)

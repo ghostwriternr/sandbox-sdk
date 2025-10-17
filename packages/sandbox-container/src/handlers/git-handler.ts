@@ -1,7 +1,6 @@
 // Git Handler
-import type { GitCheckoutResult } from '@repo/shared';
+import type { GitCheckoutResult, Logger } from '@repo/shared';
 import { ErrorCode } from '@repo/shared/errors';
-import type { Logger } from '@repo/shared';
 
 import type { GitCheckoutRequest, RequestContext } from '../core/types';
 import type { GitService } from '../services/git-service';

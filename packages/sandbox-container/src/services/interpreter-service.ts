@@ -1,5 +1,6 @@
 // Wrapper service following init-testing's ServiceResult<T> pattern
 
+import type { Logger } from '@repo/shared';
 import type {
   CodeExecutionContext,
   ContextNotFoundContext,
@@ -7,7 +8,6 @@ import type {
   InterpreterNotReadyContext,
 } from '@repo/shared/errors';
 import { ErrorCode } from '@repo/shared/errors';
-import type { Logger } from '@repo/shared';
 import type { ServiceResult } from '../core/types';
 import {
   type Context,
@@ -25,7 +25,7 @@ export class InterpreterService {
   private coreService: CoreInterpreterService;
 
   constructor(private logger: Logger) {
-    this.coreService = new CoreInterpreterService();
+    this.coreService = new CoreInterpreterService(logger);
   }
 
   /**

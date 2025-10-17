@@ -1,5 +1,6 @@
 // Port Management Service
 
+import type { Logger } from '@repo/shared';
 import type {
   InvalidPortContext,
   PortAlreadyExposedContext,
@@ -7,7 +8,6 @@ import type {
   PortNotExposedContext,
 } from '@repo/shared/errors';
 import { ErrorCode } from '@repo/shared/errors';
-import type { Logger } from '@repo/shared';
 import type { PortInfo, ServiceResult } from '../core/types';
 import { PortManager } from '../managers/port-manager';
 

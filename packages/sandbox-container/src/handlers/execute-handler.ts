@@ -1,7 +1,6 @@
 // Execute Handler
-import type { ExecResult, ProcessStartResult } from '@repo/shared';
+import type { ExecResult, Logger, ProcessStartResult } from '@repo/shared';
 import { ErrorCode } from '@repo/shared/errors';
-import type { Logger } from '@repo/shared';
 
 import type { ExecuteRequest, RequestContext } from '../core/types';
 import type { ProcessService } from '../services/process-service';

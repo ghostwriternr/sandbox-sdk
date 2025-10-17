@@ -1,10 +1,10 @@
 # Logging Architecture & Implementation Plan
 
-> **Status**: Phase 3 Complete ✅ | Ready for Phase 4
+> **Status**: Phase 5 Complete ✅ | Ready for Phase 6
 > **Last Updated**: 2025-10-17
 > **Owner**: Engineering Team
 >
-> **Progress**: 3.5 of 6 phases complete (58%)
+> **Progress**: 5 of 6 phases complete (83%)
 
 ---
 
@@ -1479,38 +1479,45 @@ File: `tests/e2e/test-worker/index.ts`
 
 ---
 
-### Phase 5: Documentation & Configuration (Priority: MEDIUM)
+### Phase 5: Documentation & Configuration ✅ COMPLETE
 
-**Estimated effort**: 2-3 hours
+**Status**: ✅ Complete
+**Actual effort**: ~2 hours
+**Completed**: 2025-10-17
 
 #### Tasks
 
-**5.1 Add Log Level Configuration**
+**5.1 User-Facing Documentation** ✅
 
-- [ ] Document `LOG_LEVEL` environment variable (debug|info|warn|error)
-- [ ] Update `wrangler.jsonc` examples
-- [ ] Add default log level: `info` (production), `debug` (development)
-- [ ] Document how to override per-environment
+- [x] Created observability guide in official Cloudflare docs
+- [x] Location: `cloudflare-docs/src/content/docs/sandbox/guides/observability.mdx`
+- [x] Documented how to enable logging (`observability` field in wrangler.jsonc)
+- [x] Explained where to view logs (Durable Objects + Containers)
+- [x] Documented trace IDs for debugging
+- [x] Added troubleshooting section
+- [x] Linked to related Cloudflare docs (Workers Logs, Containers, DO logs)
 
-**5.2 Update This Document (LOGGING.md)**
+**5.2 Updated Guides Index** ✅
 
-- [ ] Add "How to Use" section
-- [ ] Add "Viewing Logs in Cloudflare Dashboard" section
-- [ ] Add "Filtering by Trace ID" section
-- [ ] Add "Troubleshooting" section
-- [ ] Add "Best Practices" section
+- [x] Added observability guide to `cloudflare-docs/src/content/docs/sandbox/guides/index.mdx`
+- [x] Listed as: "Observability - View logs and debug with trace IDs"
 
-**5.3 Update README**
+**Key Decisions:**
+- Documentation written for SDK **users**, not SDK contributors
+- No mention of internal SDK logging configuration (LOG_LEVEL)
+- Focus on what users need: enabling logs, viewing logs, using trace IDs
+- Concise format matching other Sandbox guides (~120 lines)
 
-- [ ] Add "Observability & Logging" section
-- [ ] Link to LOGGING.md
-- [ ] Mention trace IDs for debugging
-- [ ] Explain how to enable debug logging
+**Files created:**
+- ✅ `cloudflare-docs/src/content/docs/sandbox/guides/observability.mdx` (new branch: `sandbox-logging-docs`)
 
-**Files to create/modify:**
-- `docs/LOGGING.md` (this file - expand after implementation)
-- `README.md` (add observability section)
-- Wrangler config examples
+**Files modified:**
+- ✅ `cloudflare-docs/src/content/docs/sandbox/guides/index.mdx`
+
+**Branch:**
+- `sandbox-logging-docs` in cloudflare-docs repo (ready to push/PR)
+
+**Note**: Phase 5 originally planned internal documentation, but we pivoted to user-facing docs in official Cloudflare docs instead. This is more valuable for SDK users.
 
 ---
 

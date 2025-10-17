@@ -14,6 +14,8 @@ export enum LogLevel {
   ERROR = 3,
 }
 
+export type LogComponent = 'container' | 'sandbox-do' | 'executor';
+
 /**
  * Context metadata included in every log entry
  */
@@ -27,7 +29,7 @@ export interface LogContext {
   /**
    * Component that generated the log
    */
-  component: 'worker' | 'sandbox-do' | 'container';
+  component: LogComponent;
 
   /**
    * Sandbox identifier (which sandbox instance)

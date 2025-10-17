@@ -1,13 +1,5 @@
 /**
- * CloudflareLogger implementation
- *
- * Features:
- * - Structured JSON logging for production (Cloudflare Workers Logs)
- * - Pretty printing for local development (human-readable, colored)
- * - Context inheritance via .child()
- * - Log level filtering
- * - Automatic timestamp injection
- * - Compatible with Cloudflare Workers (uses console.* methods)
+ * Logger implementation
  */
 
 import type { LogContext, Logger, LogLevel } from './types.js';

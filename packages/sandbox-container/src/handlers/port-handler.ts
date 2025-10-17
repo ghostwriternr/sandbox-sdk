@@ -1,11 +1,10 @@
 // Port Handler
-import type {
+import type {Logger, 
   PortCloseResult,
   PortExposeResult,
-  PortListResult,
+  PortListResult
 } from '@repo/shared';
 import { ErrorCode } from '@repo/shared/errors';
-import type { Logger } from '@repo/shared';
 
 import type { ExposePortRequest, RequestContext } from '../core/types';
 import type { PortService } from '../services/port-service';

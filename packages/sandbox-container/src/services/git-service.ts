@@ -1,11 +1,11 @@
 // Git Operations Service
 
+import type { Logger } from '@repo/shared';
 import type {
   GitErrorContext,
   ValidationFailedContext,
 } from '@repo/shared/errors';
 import { ErrorCode } from '@repo/shared/errors';
-import type { Logger } from '@repo/shared';
 import type { CloneOptions, ServiceResult } from '../core/types';
 import { GitManager } from '../managers/git-manager';
 import type { SessionManager } from './session-manager';

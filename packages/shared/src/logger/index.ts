@@ -35,7 +35,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { CloudflareLogger } from './logger.js';
 import { TraceContext } from './trace-context.js';
-import type { LogContext, Logger, LogLevel } from './types.js';
+import type { LogComponent, LogContext, Logger, LogLevel } from './types.js';
 import { LogLevel as LogLevelEnum } from './types.js';
 
 // Export all public types and classes
@@ -165,7 +165,7 @@ export function runWithLogger<T>(logger: Logger, fn: () => T | Promise<T>): T | 
  * ```
  */
 export function createLogger(
-  context: Partial<LogContext> & { component: 'worker' | 'sandbox-do' | 'container' }
+  context: Partial<LogContext> & { component: LogComponent }
 ): Logger {
   const minLevel = getLogLevelFromEnv();
   const pretty = isPrettyPrintEnabled();
