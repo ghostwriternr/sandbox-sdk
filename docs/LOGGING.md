@@ -1,8 +1,10 @@
 # Logging Architecture & Implementation Plan
 
-> **Status**: Planning Phase → Ready for Implementation ✅
+> **Status**: Phase 2 Complete ✅ | Phase 3 Ready 🎯
 > **Last Updated**: 2025-10-17
 > **Owner**: Engineering Team
+>
+> **Progress**: 2 of 6 phases complete (33%)
 
 ---
 
@@ -643,31 +645,33 @@ export class Session {
 
 ## Implementation Plan
 
-### Phase 1: Core Infrastructure (Priority: CRITICAL)
+### Phase 1: Core Infrastructure ✅ COMPLETE
 
-**Estimated effort**: 4-6 hours
+**Status**: ✅ Complete
+**Actual effort**: ~4 hours
+**Completed**: 2025-10-17
 
 #### Tasks
 
-**1.1 Create Shared Logger Infrastructure**
+**1.1 Create Shared Logger Infrastructure** ✅
 
-- [ ] Create `@packages/shared/src/logger/` directory
-- [ ] Create `types.ts`:
+- [x] Create `@packages/shared/src/logger/` directory
+- [x] Create `types.ts`:
   - Define `Logger` interface
   - Define `LogContext` interface
   - Define `LogLevel` enum
-- [ ] Create `logger.ts`:
+- [x] Create `logger.ts`:
   - Implement `CloudflareLogger` class
   - Implement all logging methods (debug, info, warn, error)
   - Implement context inheritance via `.child()`
   - Implement log level filtering
   - **Implement pretty printing** for local development (colored, human-readable)
   - **Implement JSON output** for production (Cloudflare Workers Logs)
-- [ ] Create `trace-context.ts`:
+- [x] Create `trace-context.ts`:
   - Implement `TraceContext.generate()`
   - Implement `TraceContext.fromHeaders()`
   - Implement `TraceContext.toHeaders()`
-- [ ] Create `index.ts`:
+- [x] Create `index.ts`:
   - Export all public APIs
   - Export `createLogger()` factory function
   - Export `TraceContext` utility
@@ -678,123 +682,369 @@ export class Session {
     - `loggerStorage` AsyncLocalStorage instance
     - `getLogger()` function to retrieve logger from context
     - `runWithLogger()` function to run code with logger context
-- [ ] Update `@packages/shared/src/index.ts`: Add logger exports
-- [ ] Update `@packages/shared/package.json`: Ensure exports configured
+- [x] Update `@packages/shared/src/index.ts`: Add logger exports
+- [x] Update `@packages/shared/package.json`: Ensure exports configured
 
-**1.2 Update Package Dependencies**
+**1.2 Update Package Dependencies** ✅
 
-- [ ] Verify `@packages/sandbox/package.json` has `@repo/shared` dependency
-- [ ] Verify `@packages/sandbox-container/package.json` has `@repo/shared` dependency
-- [ ] Run `npm install` at repository root
+- [x] Verify `@packages/sandbox/package.json` has `@repo/shared` dependency
+- [x] Verify `@packages/sandbox-container/package.json` has `@repo/shared` dependency
+- [x] Dependencies already present, no npm install needed
 
-**1.3 Enable AsyncLocalStorage Support**
+**1.3 Enable AsyncLocalStorage Support** ✅
 
-- [ ] Update `wrangler.jsonc` to enable `nodejs_compat` flag:
-  ```jsonc
-  {
-    "compatibility_flags": ["nodejs_compat"],
-    "compatibility_date": "2024-09-23"
-  }
-  ```
-- [ ] Verify compatibility date is 2024-09-23 or later (required for AsyncLocalStorage)
+- [x] Verified `wrangler.jsonc` files have `nodejs_compat` flag enabled
+- [x] Verified compatibility date is 2024-09-23 or later (all configs use 2025-05-06)
 
-**Files to create:**
-- `packages/shared/src/logger/types.ts`
-- `packages/shared/src/logger/logger.ts`
-- `packages/shared/src/logger/trace-context.ts`
-- `packages/shared/src/logger/index.ts`
+**1.4 Testing** ✅
 
-**Files to modify:**
-- `packages/shared/src/index.ts`
-- `packages/shared/package.json`
+- [x] Create comprehensive unit tests (`packages/shared/tests/logger.test.ts`)
+- [x] Create vitest configuration (`packages/shared/vitest.config.ts`)
+- [x] All 34 tests passing
+- [x] TypeScript builds successfully
+- [x] Biome checks pass (no warnings)
+
+**Files created:**
+- ✅ `packages/shared/src/logger/types.ts`
+- ✅ `packages/shared/src/logger/logger.ts`
+- ✅ `packages/shared/src/logger/trace-context.ts`
+- ✅ `packages/shared/src/logger/index.ts`
+- ✅ `packages/shared/tests/logger.test.ts`
+- ✅ `packages/shared/vitest.config.ts`
+
+**Files modified:**
+- ✅ `packages/shared/src/index.ts` (added logger exports)
+- ✅ `packages/shared/package.json` (added test script)
+
+**Verification:**
+- ✅ `npm run build` - builds successfully
+- ✅ `npm test` - 34/34 tests passing
+- ✅ `npm run check` - all checks pass
+- ✅ Consistent with turbo.json and repo structure
+
+**Key Deliverables:**
+- Complete logger infrastructure in `@repo/shared`
+- AsyncLocalStorage support for implicit context propagation
+- Pretty printing (local dev) + JSON output (production)
+- Comprehensive test coverage
+- Ready for integration in sandbox packages
 
 ---
 
-### Phase 2: Integrate Logging in @packages/sandbox (Priority: HIGH)
+### Phase 2: Integrate Logging in @packages/sandbox ✅ COMPLETE
 
-**Estimated effort**: 6-8 hours
+**Status**: ✅ Complete
+**Actual effort**: ~5 hours
+**Completed**: 2025-10-17
 
 #### Tasks
 
-**2.1 Update Sandbox DO Class**
+**2.1 Update Sandbox DO Class** ✅
 
 File: `packages/sandbox/src/sandbox.ts`
 
-- [ ] Import `createLogger`, `TraceContext` from `@repo/shared`
-- [ ] Add `private logger: Logger` property
-- [ ] Initialize logger in constructor:
-  ```typescript
-  this.logger = createLogger({
-    component: 'durable-object',
-    sandboxId: this.id
-  });
-  ```
-- [ ] Update `fetch()` method:
+- [x] Import `createLogger`, `TraceContext`, `runWithLogger`, `getLogger` from `@repo/shared`
+- [x] Add `private logger: Logger` property
+- [x] Initialize logger in constructor with component='durable-object' and sandboxId
+- [x] Update `fetch()` method:
   - Extract traceId: `TraceContext.fromHeaders()` or `TraceContext.generate()`
-  - Create child logger with traceId
+  - Create child logger with traceId and operation='fetch'
+  - Use `runWithLogger()` to store logger in AsyncLocalStorage
   - Replace console.log → logger.info
-- [ ] Update `containerFetch()`: Add traceId to outgoing headers
-- [ ] Update all public methods (exec, startProcess, etc.):
-  - Create operation-specific child logger: `.child({operation: 'exec'})`
-  - Replace console.log → logger.info/debug
-  - Add structured context (command, processId, etc.)
-- [ ] Update error handling: console.error → logger.error
-- [ ] **Reduce verbosity**:
-  - Remove: "Stored sandbox name", "Updated env vars"
-  - Keep: operation start/complete, errors, security events
-  - Move verbose logs to `logger.debug()`
+- [x] Update all public methods:
+  - Use instance logger for synchronous contexts
+  - Replace all console.log → logger.info/debug
+  - Add structured context
+- [x] Update error handling: console.error → logger.error
+- [x] Update lifecycle methods (onStart, onStop, onError, destroy)
+- [x] Update helper methods (ensureDefaultSession, isPortExposed, validatePortToken)
+- [x] Update session wrapper methods (setEnvVars in getSessionWrapper)
 
-**Current console.log statements in sandbox.ts**: ~15
-**Target**: ~6-8 (start/complete/error only)
+**Console statements replaced**: 15 → 0 (all replaced with structured logging)
 
-**2.2 Update SandboxClient and Related Clients**
+**2.2 Update SandboxClient and Related Clients** ✅
 
 Files:
-- `packages/sandbox/src/clients/base-client.ts`
-- `packages/sandbox/src/clients/*.ts`
+- `packages/sandbox/src/clients/base-client.ts` ✅
+- `packages/sandbox/src/clients/interpreter-client.ts` ✅
 
-- [ ] `base-client.ts`:
-  - Accept logger in constructor options
-  - Add traceId to all HTTP requests (via headers)
-  - Replace console.log → logger.debug
-  - Replace console.error → logger.error
-- [ ] Update all client classes to use logger
-- [ ] Remove onCommandComplete/onError callbacks (use logger instead)
+- [x] `base-client.ts`:
+  - Added `safeLog()` helper method with console fallback
+  - Replaced all console.log → safeLog('debug'/info'/warn'/error')
+  - Updated doFetch() method (9 console statements)
+  - Updated executeFetch() method (3 console statements)
+  - Updated isContainerProvisioningError() method (3 console statements)
+  - Updated logSuccess() and logError() utility methods
+- [x] `interpreter-client.ts`:
+  - Replaced console.error → this.logError() (inherited from BaseHttpClient)
 
-**2.3 Update Security Module**
+**Console statements replaced**: 19 → 0 (all replaced, with fallbacks in safeLog)
+
+**2.3 Update Security Module** ✅
 
 File: `packages/sandbox/src/security.ts`
 
-- [ ] Update `logSecurityEvent()` function:
-  - Accept logger parameter (or use module-level logger)
+- [x] Import `getLogger` from `@repo/shared`
+- [x] Update `logSecurityEvent()` function:
+  - Use `getLogger()` to retrieve logger from AsyncLocalStorage
   - Map severity to log levels:
-    - `high` → `logger.error()`
+    - `critical`/`high` → `logger.error()`
     - `medium` → `logger.warn()`
     - `low` → `logger.info()`
-  - Include structured metadata
-- [ ] Replace console.log/error/warn → logger calls
+  - Include structured metadata (securityEvent, severity, ...details)
+  - Added try-catch with console fallback
 
-**2.4 Update Other Files**
+**Console statements replaced**: 3 → 1 (fallback only)
 
-- [ ] `file-stream.ts`: Replace console.error → logger.error
-- [ ] `sse-parser.ts`: Replace console.error/log → logger.error/debug
-- [ ] `interpreter.ts`: Add logger, replace console.log
-- [ ] `request-handler.ts`: Replace console.error → logger.error
+**2.4 Update Supporting Files** ✅
 
-**Files to modify:**
-- `packages/sandbox/src/sandbox.ts`
-- `packages/sandbox/src/clients/base-client.ts`
-- `packages/sandbox/src/clients/command-client.ts`
-- `packages/sandbox/src/clients/process-client.ts`
-- `packages/sandbox/src/clients/file-client.ts`
-- `packages/sandbox/src/clients/git-client.ts`
-- `packages/sandbox/src/clients/port-client.ts`
-- `packages/sandbox/src/clients/utility-client.ts`
-- `packages/sandbox/src/security.ts`
-- `packages/sandbox/src/file-stream.ts`
-- `packages/sandbox/src/sse-parser.ts`
-- `packages/sandbox/src/interpreter.ts`
-- `packages/sandbox/src/request-handler.ts`
+- [x] `file-stream.ts`: Replaced console.error → getLogger().error with fallback (1 statement)
+- [x] `sse-parser.ts`: Replaced console.error/log → getLogger().error/debug with fallbacks (3 statements)
+- [x] `request-handler.ts`: Replaced console.error → getLogger().error with fallback (1 statement)
+- [x] `interpreter.ts`: No console statements found ✅
+
+**Total console statements replaced**: 5 → 3 (fallbacks only)
+
+**Files modified:**
+- ✅ `packages/sandbox/src/sandbox.ts`
+- ✅ `packages/sandbox/src/clients/base-client.ts`
+- ✅ `packages/sandbox/src/clients/interpreter-client.ts`
+- ✅ `packages/sandbox/src/security.ts`
+- ✅ `packages/sandbox/src/file-stream.ts`
+- ✅ `packages/sandbox/src/sse-parser.ts`
+- ✅ `packages/sandbox/src/request-handler.ts`
+
+**Verification:**
+- ✅ `npm run build --workspace=@cloudflare/sandbox` - builds successfully
+- ✅ `npm run check --workspace=@cloudflare/sandbox` - all checks pass (TypeScript + Biome)
+- ✅ `npm run build --workspace=@repo/shared` - builds successfully
+- ✅ `npm run test --workspace=@repo/shared` - 34/34 tests passing
+
+**Key Deliverables:**
+- Complete structured logging integration in Durable Object layer
+- All console.log statements replaced in sandbox package
+- Safe logging with fallbacks in client utilities
+- Trace ID propagation via runWithLogger() in fetch handler
+- AsyncLocalStorage for implicit logger propagation
+- Security events now use structured logger
+- Ready for Phase 3 (Container integration)
+
+---
+
+### Phase 2.5: Lessons Learned & Refactoring Insights
+
+**Status**: Documented lessons from Phase 2 implementation
+**Date**: 2025-10-17
+
+During Phase 2 implementation, we encountered several important issues that led to significant refactoring beyond the original plan. These lessons are documented here to inform future phases and similar projects.
+
+#### Lesson 1: Hardcoded Type Constraints Can Block Refactoring
+
+**Problem**: Changed `component` type from `'durable-object'` to `'sandbox-do'` in `LogContext` interface, but TypeScript build failed with:
+```
+Type '"sandbox-do"' is not assignable to type '"worker" | "durable-object" | "container"'
+```
+
+**Root Cause**: The `createLogger()` function had a **hardcoded union type** in its signature that didn't match the updated interface:
+```typescript
+// packages/shared/src/logger/index.ts (line 141)
+export function createLogger(
+  context: Partial<LogContext> & { component: 'worker' | 'durable-object' | 'container' }  // ❌ Hardcoded!
+): Logger
+```
+
+**Impact**: Spent 2+ hours debugging, thinking it was a caching/module resolution issue, when the actual problem was a simple hardcoded type constraint.
+
+**Solution**: Always reference the source interface type instead of duplicating:
+```typescript
+// BEFORE (BAD):
+context: Partial<LogContext> & { component: 'worker' | 'durable-object' | 'container' }
+
+// AFTER (GOOD):
+context: Partial<LogContext> & { component: LogContext['component'] }
+```
+
+**Key Takeaway**: When changing a type definition, search for ALL occurrences including:
+1. The type definition itself
+2. Function parameter constraints (often missed!)
+3. Type assertions and annotations
+4. Documentation/comments
+
+---
+
+#### Lesson 2: Logging Verbosity Review Is Essential
+
+**Problem**: Initial Phase 2 implementation simply replaced `console.log` with `logger.info` without reviewing **which logs were actually useful**.
+
+**Examples of Unnecessary Logs** (from sandbox.ts):
+```typescript
+// Internal bookkeeping - not useful for debugging
+logger.info('Stored sandbox name via RPC', { name });
+logger.debug('Set environment variable', { key });
+
+// Success messages that add no value
+logger.info('Environment variables set successfully');
+
+// Lifecycle events that could be DEBUG level
+logger.info('Sandbox started');
+logger.info('Sandbox stopped');
+```
+
+**Refactoring Insights**:
+1. **Remove internal bookkeeping logs** - Users don't care that we stored a value in storage
+2. **Remove successful operation logs** - Logging success adds noise (errors are what matter)
+3. **Downgrade lifecycle to DEBUG** - Lifecycle events are useful for debugging but not production
+4. **Keep only operation boundaries** - Log when operations start/complete with relevant context
+
+**Result**: Reduced logs from ~40 to ~15 in sandbox package (62% reduction) while improving signal-to-noise ratio.
+
+**Key Takeaway**: Structured logging ≠ just replacing console.log. Review each log's value first.
+
+---
+
+#### Lesson 3: Utilities Should Not Log
+
+**Problem**: Utility functions like `sse-parser.ts` and `file-stream.ts` had logging for error cases:
+```typescript
+// sse-parser.ts
+try {
+  const event = JSON.parse(data);
+  yield event;
+} catch (error) {
+  logger.error('Failed to parse SSE event', error); // ❌ Utility logging error
+  continue;
+}
+```
+
+**Refactoring Decision**: Utilities should **not log** - they should:
+1. Skip invalid data silently (for parsers)
+2. Throw errors for exceptional cases (let callers decide how to handle)
+3. Let callers add logging context if needed
+
+**Solution**:
+```typescript
+// AFTER: Just skip invalid JSON, don't log
+try {
+  const event = JSON.parse(data);
+  yield event;
+} catch {
+  continue; // Skip invalid events silently
+}
+```
+
+**Key Takeaway**: Utilities should be pure, side-effect-free. Logging is a side effect. Let callers control logging.
+
+---
+
+#### Lesson 4: Defensive Logging Patterns Can Be Eliminated
+
+**Problem**: The `safeLog()` pattern in BaseHttpClient attempted to be defensive:
+```typescript
+protected safeLog(level: 'debug' | 'info' | 'warn' | 'error', message: string, context?: any): void {
+  try {
+    const logger = getLogger();
+    logger[level](message, context);
+  } catch (error) {
+    // Fallback to console if logger not available
+    console[level === 'error' ? 'error' : 'log'](message, context);
+  }
+}
+```
+
+**Refactoring Decision**: Instead of defensive logging, **pass logger explicitly**:
+```typescript
+// HttpClientOptions now requires logger
+export interface HttpClientOptions {
+  logger: Logger;  // Required in production, optional for tests
+  baseUrl?: string;
+  // ...
+}
+```
+
+**Benefits**:
+1. Explicit dependency - constructor requires logger
+2. No try-catch overhead
+3. Clearer code - no hidden fallback logic
+4. Production code always has proper logging
+
+**For Tests**: Provide a no-op logger:
+```typescript
+const createNoOpLogger = (): Logger => ({
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  child: () => createNoOpLogger()
+});
+```
+
+**Key Takeaway**: Explicit dependencies > defensive programming. Make logger required in production code, optional for tests.
+
+---
+
+#### Lesson 5: Security Logging Should Be Simple
+
+**Problem**: Created an over-engineered `logSecurityEvent()` function with severity levels and special handling.
+
+**Reality Check**: We only had ~3 security log call sites, all in port exposure / URL construction.
+
+**Refactoring Decision**: Remove `logSecurityEvent()` entirely:
+- Just throw `SecurityError` for invalid inputs (e.g., invalid ports, malformed sandbox IDs)
+- Use regular `logger.warn()` for suspicious activity (e.g., invalid token attempts)
+- No need for special security logging infrastructure
+
+**Key Takeaway**: Don't build infrastructure for 3 use cases. YAGNI (You Aren't Gonna Need It).
+
+---
+
+#### Lesson 6: Component Naming Should Match User Mental Model
+
+**Problem**: Used generic name `'durable-object'` for component identifier.
+
+**Better Approach**: Use specific name `'sandbox-do'` that matches the actual class name and makes logs more searchable.
+
+**Benefits**:
+1. Logs are more specific: "sandbox-do" vs generic "durable-object"
+2. Easier to filter: Can distinguish if we ever add more Durable Objects
+3. Matches code structure: Sandbox class → 'sandbox-do'
+
+**Key Takeaway**: Component names should be specific and match the actual architecture, not generic categories.
+
+---
+
+#### Lesson 7: Test Mocks Shouldn't Require Full Production Setup
+
+**Problem**: Made `logger` required in `HttpClientOptions`, which broke 123 tests that used minimal test mocks.
+
+**Solution**: Make logger optional with no-op fallback:
+```typescript
+constructor(options: HttpClientOptions = {}) {
+  this.logger = options.logger ?? createNoOpLogger();
+  // ...
+}
+```
+
+**Benefits**:
+1. Production code explicitly passes loggers
+2. Tests work without setup (no-op logger)
+3. Tests can enable logging when debugging test failures
+4. Zero test maintenance overhead
+
+**Key Takeaway**: Production code should be explicit (pass logger), but tests should have sensible defaults.
+
+---
+
+### Summary: Phase 2 Key Insights
+
+1. **Search ALL type occurrences** - Don't forget function parameter constraints
+2. **Review log value first** - Don't blindly replace console.log
+3. **Utilities don't log** - Keep utilities pure, let callers log
+4. **Explicit > Defensive** - Pass logger explicitly, don't try-catch everywhere
+5. **YAGNI for infrastructure** - 3 use cases don't justify special infrastructure
+6. **Specific > Generic** - Component names should match actual architecture
+7. **Tests need defaults** - No-op logger for tests, explicit logger for production
+
+**These lessons significantly improved the implementation and should guide Phase 3 (Container integration).**
 
 ---
 

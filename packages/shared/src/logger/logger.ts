@@ -158,7 +158,7 @@ export class CloudflareLogger implements Logger {
    * Output as pretty-printed, colored text (development)
    *
    * Format: LEVEL [component] message (trace: tr_...) {context}
-   * Example: INFO [durable-object] Command started (trace: tr_7f3a9b2c) {commandId: "cmd-123"}
+   * Example: INFO [sandbox-do] Command started (trace: tr_7f3a9b2c) {commandId: "cmd-123"}
    */
   private outputPretty(
     consoleFn: typeof console.log | typeof console.warn | typeof console.error,

@@ -58,10 +58,6 @@ export class InterpreterClient extends BaseHttpClient {
   private readonly maxRetries = 3;
   private readonly retryDelayMs = 1000;
 
-  constructor(options: HttpClientOptions = {}) {
-    super(options);
-  }
-
   async createCodeContext(
     options: CreateContextOptions = {}
   ): Promise<CodeContext> {
@@ -326,7 +322,7 @@ export class InterpreterClient extends BaseHttpClient {
           break;
       }
     } catch (error) {
-      console.error("Failed to parse execution result:", error);
+      this.logError('parseExecutionResult', error);
     }
   }
 }

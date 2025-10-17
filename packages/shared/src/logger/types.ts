@@ -27,7 +27,7 @@ export interface LogContext {
   /**
    * Component that generated the log
    */
-  component: 'worker' | 'durable-object' | 'container';
+  component: 'worker' | 'sandbox-do' | 'container';
 
   /**
    * Sandbox identifier (which sandbox instance)
@@ -114,7 +114,7 @@ export interface Logger {
    * @returns New logger instance with merged context
    *
    * @example
-   * const logger = createLogger({ component: 'durable-object', traceId: 'tr_abc123' });
+   * const logger = createLogger({ component: 'sandbox-do', traceId: 'tr_abc123' });
    * const execLogger = logger.child({ operation: 'exec', commandId: 'cmd-456' });
    * execLogger.info('Command started'); // Includes all context: component, traceId, operation, commandId
    */

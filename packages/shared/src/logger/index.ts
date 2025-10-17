@@ -12,7 +12,7 @@
  *
  * ```typescript
  * // Create a logger at entry point
- * const logger = createLogger({ component: 'durable-object', traceId: 'tr_abc123' });
+ * const logger = createLogger({ component: 'sandbox-do', traceId: 'tr_abc123' });
  *
  * // Store in AsyncLocalStorage for entire request
  * await runWithLogger(logger, async () => {
@@ -43,6 +43,33 @@ export type { Logger, LogContext, LogLevel };
 export { CloudflareLogger } from './logger.js';
 export { TraceContext } from './trace-context.js';
 export { LogLevel as LogLevelEnum } from './types.js';
+
+/**
+ * Create a no-op logger for testing
+ *
+ * Returns a logger that implements the Logger interface but does nothing.
+ * Useful for tests that don't need actual logging output.
+ *
+ * @returns No-op logger instance
+ *
+ * @example
+ * ```typescript
+ * // In tests
+ * const client = new HttpClient({
+ *   baseUrl: 'http://test.com',
+ *   logger: createNoOpLogger() // Optional - tests can enable real logging if needed
+ * });
+ * ```
+ */
+export function createNoOpLogger(): Logger {
+  return {
+    debug: () => {},
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    child: () => createNoOpLogger(),
+  };
+}
 
 /**
  * AsyncLocalStorage for logger context
@@ -92,7 +119,7 @@ export function getLogger(): Logger {
  * ```typescript
  * // At request entry point
  * async fetch(request: Request): Promise<Response> {
- *   const logger = createLogger({ component: 'durable-object', traceId: 'tr_abc' });
+ *   const logger = createLogger({ component: 'sandbox-do', traceId: 'tr_abc' });
  *   return runWithLogger(logger, async () => {
  *     return await this.handleRequest(request);
  *   });
@@ -124,7 +151,7 @@ export function runWithLogger<T>(logger: Logger, fn: () => T | Promise<T>): T | 
  * ```typescript
  * // In Durable Object
  * const logger = createLogger({
- *   component: 'durable-object',
+ *   component: 'sandbox-do',
  *   traceId: TraceContext.fromHeaders(request.headers) || TraceContext.generate(),
  *   sandboxId: this.id
  * });
@@ -138,7 +165,7 @@ export function runWithLogger<T>(logger: Logger, fn: () => T | Promise<T>): T | 
  * ```
  */
 export function createLogger(
-  context: Partial<LogContext> & { component: 'worker' | 'durable-object' | 'container' }
+  context: Partial<LogContext> & { component: 'worker' | 'sandbox-do' | 'container' }
 ): Logger {
   const minLevel = getLogLevelFromEnv();
   const pretty = isPrettyPrintEnabled();

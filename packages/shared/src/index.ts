@@ -20,9 +20,10 @@ export { Execution, ResultImpl } from './interpreter-types.js';
 export type { LogContext, Logger, LogLevel } from './logger/index.js';
 export {
   createLogger,
+  createNoOpLogger,
   getLogger,
   LogLevelEnum,
-  runWithLogger, 
+  runWithLogger,
   TraceContext
 } from './logger/index.js';
 // Export all request types (enforce contract between client and container)
