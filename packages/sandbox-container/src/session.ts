@@ -336,13 +336,13 @@ export class Session {
               if (line.startsWith(STDOUT_PREFIX)) {
                 yield {
                   type: 'stdout',
-                  data: line.slice(STDOUT_PREFIX.length) + '\n',
+                  data: `${line.slice(STDOUT_PREFIX.length)}\n`,
                   timestamp: new Date().toISOString(),
                 };
               } else if (line.startsWith(STDERR_PREFIX)) {
                 yield {
                   type: 'stderr',
-                  data: line.slice(STDERR_PREFIX.length) + '\n',
+                  data: `${line.slice(STDERR_PREFIX.length)}\n`,
                   timestamp: new Date().toISOString(),
                 };
               }
@@ -367,13 +367,13 @@ export class Session {
             if (line.startsWith(STDOUT_PREFIX)) {
               yield {
                 type: 'stdout',
-                data: line.slice(STDOUT_PREFIX.length) + '\n',
+                data: `${line.slice(STDOUT_PREFIX.length)}\n`,
                 timestamp: new Date().toISOString(),
               };
             } else if (line.startsWith(STDERR_PREFIX)) {
               yield {
                 type: 'stderr',
-                data: line.slice(STDERR_PREFIX.length) + '\n',
+                data: `${line.slice(STDERR_PREFIX.length)}\n`,
                 timestamp: new Date().toISOString(),
               };
             }

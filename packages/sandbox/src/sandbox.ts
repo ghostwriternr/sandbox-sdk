@@ -504,18 +504,6 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     return this.client.processes.streamProcessLogs(processId);
   }
 
-  /**
-   * Internal session-aware streamProcessLogs implementation
-   */
-  private async streamProcessLogsWithSession(processId: string, sessionId: string, options?: { signal?: AbortSignal }): Promise<ReadableStream<Uint8Array>> {
-    // Check for cancellation
-    if (options?.signal?.aborted) {
-      throw new Error('Operation was aborted');
-    }
-
-    return this.client.processes.streamProcessLogs(processId);
-  }
-
   async gitCheckout(
     repoUrl: string,
     options: { branch?: string; targetDir?: string; sessionId?: string }

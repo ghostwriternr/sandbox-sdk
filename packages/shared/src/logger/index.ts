@@ -1,0 +1,251 @@
+/**
+ * Logger module for Cloudflare Sandbox SDK
+ *
+ * Provides structured, trace-aware logging with:
+ * - AsyncLocalStorage for implicit context propagation
+ * - Pretty printing for local development
+ * - JSON output for production
+ * - Environment auto-detection
+ * - Log level configuration
+ *
+ * Usage:
+ *
+ * ```typescript
+ * // Create a logger at entry point
+ * const logger = createLogger({ component: 'durable-object', traceId: 'tr_abc123' });
+ *
+ * // Store in AsyncLocalStorage for entire request
+ * await runWithLogger(logger, async () => {
+ *   await handleRequest();
+ * });
+ *
+ * // Retrieve logger anywhere in call stack
+ * const logger = getLogger();
+ * logger.info('Operation started');
+ *
+ * // Add operation-specific context
+ * const execLogger = logger.child({ operation: 'exec', commandId: 'cmd-456' });
+ * await runWithLogger(execLogger, async () => {
+ *   // All nested calls automatically get execLogger
+ *   await executeCommand();
+ * });
+ * ```
+ */
+
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { CloudflareLogger } from './logger.js';
+import { TraceContext } from './trace-context.js';
+import type { LogContext, Logger, LogLevel } from './types.js';
+import { LogLevel as LogLevelEnum } from './types.js';
+
+// Export all public types and classes
+export type { Logger, LogContext, LogLevel };
+export { CloudflareLogger } from './logger.js';
+export { TraceContext } from './trace-context.js';
+export { LogLevel as LogLevelEnum } from './types.js';
+
+/**
+ * AsyncLocalStorage for logger context
+ *
+ * Enables implicit logger propagation throughout the call stack without
+ * explicit parameter passing. The logger is stored per async context.
+ */
+const loggerStorage = new AsyncLocalStorage<Logger>();
+
+/**
+ * Get the current logger from AsyncLocalStorage
+ *
+ * @throws Error if no logger is initialized in the current async context
+ * @returns Current logger instance
+ *
+ * @example
+ * ```typescript
+ * function someHelperFunction() {
+ *   const logger = getLogger(); // Automatically has all context!
+ *   logger.info('Helper called');
+ * }
+ * ```
+ */
+export function getLogger(): Logger {
+  const logger = loggerStorage.getStore();
+  if (!logger) {
+    throw new Error(
+      'Logger not initialized in async context. ' +
+        'Ensure runWithLogger() is called at the entry point (e.g., fetch handler).'
+    );
+  }
+  return logger;
+}
+
+/**
+ * Run a function with a logger stored in AsyncLocalStorage
+ *
+ * The logger is available to all code within the function via getLogger().
+ * This is typically called at request entry points (fetch handler) and when
+ * creating child loggers with additional context.
+ *
+ * @param logger Logger instance to store in context
+ * @param fn Function to execute with logger context
+ * @returns Result of the function
+ *
+ * @example
+ * ```typescript
+ * // At request entry point
+ * async fetch(request: Request): Promise<Response> {
+ *   const logger = createLogger({ component: 'durable-object', traceId: 'tr_abc' });
+ *   return runWithLogger(logger, async () => {
+ *     return await this.handleRequest(request);
+ *   });
+ * }
+ *
+ * // When adding operation context
+ * async exec(command: string) {
+ *   const logger = getLogger().child({ operation: 'exec', commandId: 'cmd-123' });
+ *   return runWithLogger(logger, async () => {
+ *     logger.info('Command started');
+ *     await this.executeCommand(command); // Nested calls get the child logger
+ *     logger.info('Command completed');
+ *   });
+ * }
+ * ```
+ */
+export function runWithLogger<T>(logger: Logger, fn: () => T | Promise<T>): T | Promise<T> {
+  return loggerStorage.run(logger, fn);
+}
+
+/**
+ * Create a new logger instance
+ *
+ * @param context Base context for the logger. Must include 'component'.
+ *                TraceId will be auto-generated if not provided.
+ * @returns New logger instance
+ *
+ * @example
+ * ```typescript
+ * // In Durable Object
+ * const logger = createLogger({
+ *   component: 'durable-object',
+ *   traceId: TraceContext.fromHeaders(request.headers) || TraceContext.generate(),
+ *   sandboxId: this.id
+ * });
+ *
+ * // In Container
+ * const logger = createLogger({
+ *   component: 'container',
+ *   traceId: TraceContext.fromHeaders(request.headers)!,
+ *   sessionId: this.id
+ * });
+ * ```
+ */
+export function createLogger(
+  context: Partial<LogContext> & { component: 'worker' | 'durable-object' | 'container' }
+): Logger {
+  const minLevel = getLogLevelFromEnv();
+  const pretty = isPrettyPrintEnabled();
+
+  const baseContext: LogContext = {
+    ...context,
+    traceId: context.traceId || TraceContext.generate(),
+    component: context.component,
+  };
+
+  return new CloudflareLogger(baseContext, minLevel, pretty);
+}
+
+/**
+ * Get log level from environment variable
+ *
+ * Checks LOG_LEVEL env var, falls back to default based on environment.
+ * Default: 'debug' for development, 'info' for production
+ */
+function getLogLevelFromEnv(): LogLevel {
+  const envLevel = getEnvVar('LOG_LEVEL') || getDefaultLogLevel();
+
+  switch (envLevel.toLowerCase()) {
+    case 'debug':
+      return LogLevelEnum.DEBUG;
+    case 'info':
+      return LogLevelEnum.INFO;
+    case 'warn':
+      return LogLevelEnum.WARN;
+    case 'error':
+      return LogLevelEnum.ERROR;
+    default:
+      // Invalid level, fall back to info
+      return LogLevelEnum.INFO;
+  }
+}
+
+/**
+ * Get default log level based on environment
+ */
+function getDefaultLogLevel(): string {
+  return isProduction() ? 'info' : 'debug';
+}
+
+/**
+ * Check if pretty printing should be enabled
+ *
+ * Checks LOG_FORMAT env var, falls back to auto-detection:
+ * - Local development: pretty (colored, human-readable)
+ * - Production: json (structured)
+ */
+function isPrettyPrintEnabled(): boolean {
+  // Check explicit LOG_FORMAT env var
+  const format = getEnvVar('LOG_FORMAT');
+  if (format) {
+    return format.toLowerCase() === 'pretty';
+  }
+
+  // Auto-detect: pretty in local development, JSON in production
+  return !isProduction();
+}
+
+/**
+ * Detect if running in production environment
+ *
+ * Detection strategy:
+ * 1. Check NODE_ENV if available (Node.js / Bun)
+ * 2. Detect Cloudflare Workers environment via globalThis APIs
+ * 3. Default to production if Cloudflare APIs detected
+ */
+function isProduction(): boolean {
+  // Check NODE_ENV if available (container/local)
+  const nodeEnv = getEnvVar('NODE_ENV');
+  if (nodeEnv) {
+    return nodeEnv === 'production';
+  }
+
+  // Detect Cloudflare Workers environment
+  // In Workers, globalThis has specific Cloudflare APIs
+  const global = globalThis as any;
+  const hasCloudflareAPIs =
+    typeof global.caches !== 'undefined' &&
+    typeof global.Response !== 'undefined' &&
+    typeof global.Request !== 'undefined';
+
+  // Default: assume production if Cloudflare APIs detected
+  return hasCloudflareAPIs;
+}
+
+/**
+ * Get environment variable value
+ *
+ * Supports both Node.js (process.env) and Bun (Bun.env)
+ */
+function getEnvVar(name: string): string | undefined {
+  // Try process.env first (Node.js / Bun)
+  if (typeof process !== 'undefined' && process.env) {
+    return process.env[name];
+  }
+
+  // Try Bun.env (Bun runtime)
+  if (typeof Bun !== 'undefined') {
+    const bunEnv = (Bun as any).env as Record<string, string | undefined> | undefined;
+    if (bunEnv) {
+      return bunEnv[name];
+    }
+  }
+
+  return undefined;
+}
