@@ -85,10 +85,8 @@ export class Container {
     const processStore = new InMemoryProcessStore();
     const portStore = new InMemoryPortStore();
 
-    // Initialize SessionManager (always - no test-specific conditionals)
-    logger.debug('Initializing SessionManager');
+    // Initialize SessionManager
     const sessionManager = new SessionManager(logger);
-    logger.debug('SessionManager created');
 
     // Initialize services
     const processService = new ProcessService(processStore, logger, sessionManager);
@@ -145,10 +143,5 @@ export class Container {
 
   isInitialized(): boolean {
     return this.initialized;
-  }
-
-  // Helper method to get all dependencies (for testing)
-  getAllDependencies(): Partial<Dependencies> {
-    return { ...this.dependencies };
   }
 }

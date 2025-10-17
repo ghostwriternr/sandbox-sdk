@@ -74,12 +74,6 @@ export class SessionHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Session creation failed', undefined, {
-        requestId: context.requestId,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
-
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -96,12 +90,6 @@ export class SessionHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Session listing failed', undefined, {
-        requestId: context.requestId,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
-
       return this.createErrorResponse(result.error, context);
     }
   }

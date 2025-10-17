@@ -45,13 +45,6 @@ export class ExecuteHandler extends BaseHandler<Request, Response> {
       });
 
       if (!processResult.success) {
-        this.logger.error('Background process start failed', undefined, {
-          requestId: context.requestId,
-          command: body.command,
-          sessionId,
-          errorCode: processResult.error.code,
-          errorMessage: processResult.error.message,
-        });
         return this.createErrorResponse(processResult.error, context);
       }
 
@@ -75,13 +68,6 @@ export class ExecuteHandler extends BaseHandler<Request, Response> {
     });
 
     if (!result.success) {
-      this.logger.error('Command execution failed', undefined, {
-        requestId: context.requestId,
-        command: body.command,
-        sessionId,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
       return this.createErrorResponse(result.error, context);
     }
 
@@ -112,13 +98,6 @@ export class ExecuteHandler extends BaseHandler<Request, Response> {
     });
 
     if (!processResult.success) {
-      this.logger.error('Streaming process start failed', undefined, {
-        requestId: context.requestId,
-        command: body.command,
-        sessionId,
-        errorCode: processResult.error.code,
-        errorMessage: processResult.error.message,
-      });
       return this.createErrorResponse(processResult.error, context);
     }
 

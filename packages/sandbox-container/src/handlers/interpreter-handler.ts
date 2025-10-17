@@ -66,12 +66,6 @@ export class InterpreterHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Health check failed', undefined, {
-        requestId: context.requestId,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
-
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -94,12 +88,6 @@ export class InterpreterHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Context creation failed', undefined, {
-        requestId: context.requestId,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
-
       // Special handling for interpreter not ready - return 503 with Retry-After header
       if (result.error.code === 'INTERPRETER_NOT_READY') {
         return new Response(
@@ -139,12 +127,6 @@ export class InterpreterHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Context listing failed', undefined, {
-        requestId: context.requestId,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
-
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -161,13 +143,6 @@ export class InterpreterHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Context deletion failed', undefined, {
-        requestId: context.requestId,
-        contextId,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
-
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -186,15 +161,6 @@ export class InterpreterHandler extends BaseHandler<Request, Response> {
       body.code,
       body.language
     );
-
-    // If it's an error response, log it
-    if (!response.ok) {
-      this.logger.error('Code execution failed', undefined, {
-        requestId: context.requestId,
-        contextId: body.context_id,
-        status: response.status,
-      });
-    }
 
     return response;
   }

@@ -65,13 +65,6 @@ export class PortHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Port expose failed', undefined, {
-        requestId: context.requestId,
-        port: body.port,
-        name: body.name,
-        errorCode: result.error!.code,
-        errorMessage: result.error!.message,
-      });
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -88,12 +81,6 @@ export class PortHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Port unexpose failed', undefined, {
-        requestId: context.requestId,
-        port,
-        errorCode: result.error!.code,
-        errorMessage: result.error!.message,
-      });
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -116,11 +103,6 @@ export class PortHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Port listing failed', undefined, {
-        requestId: context.requestId,
-        errorCode: result.error!.code,
-        errorMessage: result.error!.message,
-      });
       return this.createErrorResponse(result.error, context);
     }
   }

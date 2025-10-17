@@ -77,12 +77,6 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Process start failed', undefined, {
-        requestId: context.requestId,
-        command: body.command,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -115,12 +109,6 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Process listing failed', undefined, {
-        requestId: context.requestId,
-        filters,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -147,12 +135,6 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Process get failed', undefined, {
-        requestId: context.requestId,
-        processId,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -169,12 +151,6 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Process kill failed', undefined, {
-        requestId: context.requestId,
-        processId,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -191,11 +167,6 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Kill all processes failed', undefined, {
-        requestId: context.requestId,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -216,12 +187,6 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Process logs get failed', undefined, {
-        requestId: context.requestId,
-        processId,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -233,12 +198,6 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
       // Create SSE stream for process logs
       const processResult = await this.processService.getProcess(processId);
       if (!processResult.success) {
-        this.logger.error('Process stream setup failed - process not found', undefined, {
-          requestId: context.requestId,
-          processId,
-          errorCode: processResult.error.code,
-          errorMessage: processResult.error.message,
-        });
         return this.createErrorResponse(processResult.error, context);
       }
 
@@ -338,12 +297,6 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
         },
       });
     } else {
-      this.logger.error('Process stream failed', undefined, {
-        requestId: context.requestId,
-        processId,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
       return this.createErrorResponse(result.error, context);
     }
   }

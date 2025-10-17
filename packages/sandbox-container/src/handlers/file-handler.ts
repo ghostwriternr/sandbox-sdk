@@ -82,13 +82,6 @@ export class FileHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('File read failed', undefined, {
-        requestId: context.requestId,
-        path: body.path,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
-
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -181,13 +174,6 @@ export class FileHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('File write failed', undefined, {
-        requestId: context.requestId,
-        path: body.path,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
-
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -206,13 +192,6 @@ export class FileHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('File delete failed', undefined, {
-        requestId: context.requestId,
-        path: body.path,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
-
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -232,14 +211,6 @@ export class FileHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('File rename failed', undefined, {
-        requestId: context.requestId,
-        oldPath: body.oldPath,
-        newPath: body.newPath,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
-
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -259,14 +230,6 @@ export class FileHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('File move failed', undefined, {
-        requestId: context.requestId,
-        sourcePath: body.sourcePath,
-        destinationPath: body.destinationPath,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
-
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -288,14 +251,6 @@ export class FileHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('Directory creation failed', undefined, {
-        requestId: context.requestId,
-        path: body.path,
-        recursive: body.recursive,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
-
       return this.createErrorResponse(result.error, context);
     }
   }
@@ -320,13 +275,6 @@ export class FileHandler extends BaseHandler<Request, Response> {
 
       return this.createTypedResponse(response, context);
     } else {
-      this.logger.error('List files failed', undefined, {
-        requestId: context.requestId,
-        path: body.path,
-        errorCode: result.error.code,
-        errorMessage: result.error.message,
-      });
-
       return this.createErrorResponse(result.error, context);
     }
   }
