@@ -1,13 +1,13 @@
 // SessionManager Service - Manages persistent execution sessions
 
-import type { ExecEvent } from '@repo/shared';
+import type { ExecEvent, Logger } from '@repo/shared';
 import type {
   CommandErrorContext,
   CommandNotFoundContext,
   InternalErrorContext,
 } from '@repo/shared/errors';
 import { ErrorCode } from '@repo/shared/errors';
-import type { Logger, ServiceResult } from '../core/types';
+import type { ServiceResult } from '../core/types';
 import { type RawExecResult, Session, type SessionOptions } from '../session';
 
 /**
@@ -43,12 +43,12 @@ export class SessionManager {
         };
       }
 
-      // Create and initialize session
-      console.log('[SessionManager] Creating Session object', { sessionId: options.id, options });
-      const session = new Session(options);
-      console.log('[SessionManager] Session object created, calling initialize()');
+      // Create and initialize session - pass logger with sessionId context
+      const session = new Session({
+        ...options,
+        logger: this.logger
+      });
       await session.initialize();
-      console.log('[SessionManager] Session initialized successfully');
 
       this.sessions.set(options.id, session);
 
@@ -64,12 +64,6 @@ export class SessionManager {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       const errorStack = error instanceof Error ? error.stack : undefined;
-
-      console.error('[SessionManager] Session creation failed:', {
-        sessionId: options.id,
-        error: errorMessage,
-        stack: errorStack,
-      });
 
       this.logger.error('Failed to create session', error instanceof Error ? error : undefined, {
         sessionId: options.id,
@@ -219,29 +213,21 @@ export class SessionManager {
       // Get async generator
       const generator = session.execStream(command, { commandId, cwd });
 
-      console.log(`[SessionManager] Awaiting first event for commandId: ${commandId}`);
-
       // CRITICAL: Await first event to ensure command is tracked before returning
       // This prevents race condition where killCommand() is called before trackCommand()
       const firstResult = await generator.next();
-
-      console.log(`[SessionManager] First event received for commandId: ${commandId} | Event type: ${firstResult.done ? 'DONE' : firstResult.value.type}`);
 
       if (!firstResult.done) {
         onEvent(firstResult.value);
       }
 
-      console.log(`[SessionManager] Returning from executeStreamInSession (command is now tracked): ${commandId}`);
-
       // Create background task for remaining events
       const continueStreaming = (async () => {
         try {
-          console.log(`[SessionManager] Background streaming starting for: ${commandId}`);
           for await (const event of generator) {
             onEvent(event);
           }
           this.logger.info('Streaming command completed', { sessionId, commandId });
-          console.log(`[SessionManager] Background streaming completed for: ${commandId}`);
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : 'Unknown error';
           this.logger.error('Error during streaming', error instanceof Error ? error : undefined, {
@@ -249,7 +235,6 @@ export class SessionManager {
             commandId,
             originalError: errorMessage
           });
-          console.log(`[SessionManager] Background streaming ERROR for: ${commandId} | Error: ${errorMessage}`);
           throw error;
         }
       })();

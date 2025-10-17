@@ -4,9 +4,9 @@ import type {
   ProcessNotFoundContext,
 } from '@repo/shared/errors';
 import { ErrorCode } from '@repo/shared/errors';
+import type { Logger } from '@repo/shared';
 import type {
   CommandResult,
-  Logger,
   ProcessOptions,
   ProcessRecord,
   ProcessStatus,

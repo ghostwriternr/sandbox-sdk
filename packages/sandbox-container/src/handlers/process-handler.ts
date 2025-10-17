@@ -1,5 +1,5 @@
 import type {
-  ProcessCleanupResult, 
+  ProcessCleanupResult,
   ProcessInfoResult,
   ProcessKillResult,
   ProcessListResult,
@@ -7,7 +7,9 @@ import type {
   ProcessStartResult
 } from '@repo/shared';
 import { ErrorCode } from '@repo/shared/errors';
-import type { Logger, ProcessStatus, RequestContext, StartProcessRequest } from '../core/types';
+import type { Logger } from '@repo/shared';
+
+import type { ProcessStatus, RequestContext, StartProcessRequest } from '../core/types';
 import type { ProcessService } from '../services/process-service';
 import { BaseHandler } from './base-handler';
 

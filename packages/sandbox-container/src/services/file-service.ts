@@ -1,4 +1,4 @@
-import type { FileInfo, ListFilesOptions } from '@repo/shared';
+import type { FileInfo, ListFilesOptions, Logger } from '@repo/shared';
 import type {
   FileNotFoundContext,
   FileSystemContext,
@@ -8,7 +8,6 @@ import { ErrorCode, Operation } from '@repo/shared/errors';
 import type {
   FileMetadata,
   FileStats,
-  Logger,
   MkdirOptions,
   ReadOptions,
   ServiceResult,

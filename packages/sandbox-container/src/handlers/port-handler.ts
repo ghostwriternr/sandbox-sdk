@@ -5,8 +5,9 @@ import type {
   PortListResult,
 } from '@repo/shared';
 import { ErrorCode } from '@repo/shared/errors';
+import type { Logger } from '@repo/shared';
 
-import type { ExposePortRequest, Logger, RequestContext } from '../core/types';
+import type { ExposePortRequest, RequestContext } from '../core/types';
 import type { PortService } from '../services/port-service';
 import { BaseHandler } from './base-handler';
 

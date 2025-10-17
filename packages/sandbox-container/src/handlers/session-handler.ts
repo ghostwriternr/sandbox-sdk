@@ -1,7 +1,9 @@
 import { randomBytes } from "node:crypto";
 import type { SessionCreateResult } from '@repo/shared';
 import { ErrorCode } from '@repo/shared/errors';
-import type { Logger, RequestContext } from '../core/types';
+import type { Logger } from '@repo/shared';
+
+import type { RequestContext } from '../core/types';
 import type { SessionManager } from '../services/session-manager';
 import { BaseHandler } from './base-handler';
 

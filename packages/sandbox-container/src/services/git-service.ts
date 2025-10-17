@@ -5,7 +5,8 @@ import type {
   ValidationFailedContext,
 } from '@repo/shared/errors';
 import { ErrorCode } from '@repo/shared/errors';
-import type { CloneOptions, Logger, ServiceResult } from '../core/types';
+import type { Logger } from '@repo/shared';
+import type { CloneOptions, ServiceResult } from '../core/types';
 import { GitManager } from '../managers/git-manager';
 import type { SessionManager } from './session-manager';
 

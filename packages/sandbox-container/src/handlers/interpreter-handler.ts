@@ -6,7 +6,9 @@ import type {
   InterpreterHealthResult,
 } from '@repo/shared';
 import { ErrorCode } from '@repo/shared/errors';
-import type { Logger, RequestContext } from '../core/types';
+import type { Logger } from '@repo/shared';
+
+import type { RequestContext } from '../core/types';
 import type { CreateContextRequest } from '../interpreter-service';
 import type { InterpreterService } from '../services/interpreter-service';
 import { BaseHandler } from './base-handler';

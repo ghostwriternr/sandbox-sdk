@@ -7,7 +7,8 @@ import type {
   PortNotExposedContext,
 } from '@repo/shared/errors';
 import { ErrorCode } from '@repo/shared/errors';
-import type { Logger, PortInfo, ServiceResult } from '../core/types';
+import type { Logger } from '@repo/shared';
+import type { PortInfo, ServiceResult } from '../core/types';
 import { PortManager } from '../managers/port-manager';
 
 export interface SecurityService {

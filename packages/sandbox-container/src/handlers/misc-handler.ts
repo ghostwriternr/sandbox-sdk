@@ -1,8 +1,9 @@
 // Miscellaneous Handler for ping, commands, etc.
 import type { HealthCheckResult, ShutdownResult } from '@repo/shared';
 import { ErrorCode } from '@repo/shared/errors';
+import type { Logger } from '@repo/shared';
 
-import type { Logger, RequestContext } from '../core/types';
+import type { RequestContext } from '../core/types';
 import { BaseHandler } from './base-handler';
 
 export class MiscHandler extends BaseHandler<Request, Response> {

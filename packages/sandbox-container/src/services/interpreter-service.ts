@@ -7,7 +7,8 @@ import type {
   InterpreterNotReadyContext,
 } from '@repo/shared/errors';
 import { ErrorCode } from '@repo/shared/errors';
-import type { Logger, ServiceResult } from '../core/types';
+import type { Logger } from '@repo/shared';
+import type { ServiceResult } from '../core/types';
 import {
   type Context,
   InterpreterService as CoreInterpreterService,
