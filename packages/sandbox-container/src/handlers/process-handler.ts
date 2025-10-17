@@ -62,23 +62,10 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
     // Extract command and pass remaining fields as options (flat structure)
     const { command, ...options } = body;
 
-    this.logger.info('Starting process', {
-      requestId: context.requestId,
-      command,
-      options
-    });
-
     const result = await this.processService.startProcess(command, options);
 
     if (result.success) {
       const process = result.data;
-
-      this.logger.info('Process started successfully', {
-        requestId: context.requestId,
-        processId: process.id,
-        pid: process.pid,
-        command: process.command,
-      });
 
       const response: ProcessStartResult = {
         success: true,
@@ -101,8 +88,6 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
   }
 
   private async handleList(request: Request, context: RequestContext): Promise<Response> {
-    this.logger.info('Listing processes', { requestId: context.requestId });
-
     // Extract query parameters for filtering
     const url = new URL(request.url);
     const status = url.searchParams.get('status');
@@ -141,11 +126,6 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
   }
 
   private async handleGet(request: Request, context: RequestContext, processId: string): Promise<Response> {
-    this.logger.info('Getting process', {
-      requestId: context.requestId,
-      processId
-    });
-
     const result = await this.processService.getProcess(processId);
 
     if (result.success) {
@@ -178,19 +158,9 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
   }
 
   private async handleKill(request: Request, context: RequestContext, processId: string): Promise<Response> {
-    this.logger.info('Killing process', {
-      requestId: context.requestId,
-      processId
-    });
-
     const result = await this.processService.killProcess(processId);
 
     if (result.success) {
-      this.logger.info('Process killed successfully', {
-        requestId: context.requestId,
-        processId,
-      });
-
       const response: ProcessKillResult = {
         success: true,
         processId,
@@ -210,16 +180,9 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
   }
 
   private async handleKillAll(request: Request, context: RequestContext): Promise<Response> {
-    this.logger.info('Killing all processes', { requestId: context.requestId });
-
     const result = await this.processService.killAllProcesses();
 
     if (result.success) {
-      this.logger.info('All processes killed successfully', {
-        requestId: context.requestId,
-        count: result.data,
-      });
-
       const response: ProcessCleanupResult = {
         success: true,
         cleanedCount: result.data,
@@ -238,11 +201,6 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
   }
 
   private async handleLogs(request: Request, context: RequestContext, processId: string): Promise<Response> {
-    this.logger.info('Getting process logs', {
-      requestId: context.requestId,
-      processId
-    });
-
     const result = await this.processService.getProcess(processId);
 
     if (result.success) {
@@ -269,11 +227,6 @@ export class ProcessHandler extends BaseHandler<Request, Response> {
   }
 
   private async handleStream(request: Request, context: RequestContext, processId: string): Promise<Response> {
-    this.logger.info('Streaming process logs', {
-      requestId: context.requestId,
-      processId
-    });
-
     const result = await this.processService.streamProcessLogs(processId);
 
     if (result.success) {

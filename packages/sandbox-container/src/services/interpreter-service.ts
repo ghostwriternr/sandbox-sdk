@@ -26,7 +26,6 @@ export class InterpreterService {
 
   constructor(private logger: Logger) {
     this.coreService = new CoreInterpreterService();
-    this.logger.info('InterpreterService initialized');
   }
 
   /**
@@ -62,11 +61,7 @@ export class InterpreterService {
    */
   async createContext(request: CreateContextRequest): Promise<ServiceResult<Context>> {
     try {
-      this.logger.info('Creating code context', { request });
-
       const context = await this.coreService.createContext(request);
-
-      this.logger.info('Code context created', { contextId: context.id });
 
       return {
         success: true,
@@ -136,11 +131,7 @@ export class InterpreterService {
    */
   async deleteContext(contextId: string): Promise<ServiceResult<void>> {
     try {
-      this.logger.info('Deleting code context', { contextId });
-
       await this.coreService.deleteContext(contextId);
-
-      this.logger.info('Code context deleted', { contextId });
 
       return {
         success: true,
@@ -191,8 +182,6 @@ export class InterpreterService {
     language?: string
   ): Promise<Response> {
     try {
-      this.logger.info('Executing code', { contextId, language });
-
       // The core service returns a Response directly for streaming
       const response = await this.coreService.executeCode(contextId, code, language);
 

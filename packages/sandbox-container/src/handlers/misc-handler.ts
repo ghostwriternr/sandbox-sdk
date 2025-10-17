@@ -37,8 +37,6 @@ export class MiscHandler extends BaseHandler<Request, Response> {
   }
 
   private async handleHealth(request: Request, context: RequestContext): Promise<Response> {
-    this.logger.info('Health check request', { requestId: context.requestId });
-
     const response: HealthCheckResult = {
       success: true,
       status: 'healthy',
@@ -49,8 +47,6 @@ export class MiscHandler extends BaseHandler<Request, Response> {
   }
 
   private async handleShutdown(request: Request, context: RequestContext): Promise<Response> {
-    this.logger.info('Shutdown request', { requestId: context.requestId });
-
     const response: ShutdownResult = {
       success: true,
       message: 'Container shutdown initiated',

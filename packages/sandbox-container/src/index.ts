@@ -1,6 +1,5 @@
-// Modular Container Server
-import { serve } from "bun";
 import { createLogger } from '@repo/shared';
+import { serve } from "bun";
 import { Container } from './core/container';
 import { Router } from './core/router';
 import { setupRoutes } from './routes/setup';
@@ -30,7 +29,7 @@ async function createApplication(): Promise<{ fetch: (req: Request) => Promise<R
 // Initialize the application
 const app = await createApplication();
 
-// Start the Bun server with enhanced configuration
+// Start the Bun server
 const server = serve({
   fetch: app.fetch,
   hostname: "0.0.0.0",

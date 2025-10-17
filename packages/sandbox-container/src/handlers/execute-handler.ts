@@ -36,13 +36,6 @@ export class ExecuteHandler extends BaseHandler<Request, Response> {
     // Parse request body directly
     const body = await this.parseRequestBody<ExecuteRequest>(request);
     const sessionId = body.sessionId || context.sessionId;
-    
-    this.logger.info('Executing command', { 
-      requestId: context.requestId,
-      command: body.command,
-      sessionId,
-      background: body.background
-    });
 
     // If this is a background process, start it as a process
     if (body.background) {
@@ -63,11 +56,6 @@ export class ExecuteHandler extends BaseHandler<Request, Response> {
       }
 
       const processData = processResult.data;
-      this.logger.info('Background process started successfully', {
-        requestId: context.requestId,
-        processId: processData.id,
-        command: body.command,
-      });
 
       const response: ProcessStartResult = {
         success: true,
@@ -98,12 +86,6 @@ export class ExecuteHandler extends BaseHandler<Request, Response> {
     }
 
     const commandResult = result.data;
-    this.logger.info('Command executed successfully', {
-      requestId: context.requestId,
-      command: body.command,
-      exitCode: commandResult.exitCode,
-      success: commandResult.success,
-    });
 
     const response: ExecResult = {
       success: commandResult.success,
@@ -123,12 +105,6 @@ export class ExecuteHandler extends BaseHandler<Request, Response> {
     // Parse request body directly
     const body = await this.parseRequestBody<ExecuteRequest>(request);
     const sessionId = body.sessionId || context.sessionId;
-    
-    this.logger.info('Starting streaming command execution', { 
-      requestId: context.requestId,
-      command: body.command,
-      sessionId
-    });
 
     // Start the process for streaming
     const processResult = await this.processService.startProcess(body.command, {
@@ -147,12 +123,6 @@ export class ExecuteHandler extends BaseHandler<Request, Response> {
     }
 
     const process = processResult.data;
-
-    this.logger.info('Streaming process started successfully', {
-      requestId: context.requestId,
-      processId: process.id,
-      command: body.command,
-    });
 
     // Create SSE stream
     const stream = new ReadableStream({

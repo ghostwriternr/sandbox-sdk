@@ -55,15 +55,9 @@ export class InterpreterHandler extends BaseHandler<Request, Response> {
   }
 
   private async handleHealth(request: Request, context: RequestContext): Promise<Response> {
-    this.logger.info('Checking interpreter health', { requestId: context.requestId });
-
     const result = await this.interpreterService.getHealthStatus();
 
     if (result.success) {
-      this.logger.info('Health check successful', {
-        requestId: context.requestId
-      });
-
       const response: InterpreterHealthResult = {
         success: true,
         status: result.data.ready ? 'healthy' : 'unhealthy',
@@ -85,22 +79,10 @@ export class InterpreterHandler extends BaseHandler<Request, Response> {
   private async handleCreateContext(request: Request, context: RequestContext): Promise<Response> {
     const body = await this.parseRequestBody<CreateContextRequest>(request);
 
-    this.logger.info('Creating code context', {
-      requestId: context.requestId,
-      language: body.language,
-      cwd: body.cwd
-    });
-
     const result = await this.interpreterService.createContext(body);
 
     if (result.success) {
       const contextData = result.data;
-
-      this.logger.info('Context created successfully', {
-        requestId: context.requestId,
-        contextId: contextData.id,
-        language: contextData.language,
-      });
 
       const response: ContextCreateResult = {
         success: true,
@@ -142,16 +124,9 @@ export class InterpreterHandler extends BaseHandler<Request, Response> {
   }
 
   private async handleListContexts(request: Request, context: RequestContext): Promise<Response> {
-    this.logger.info('Listing contexts', { requestId: context.requestId });
-
     const result = await this.interpreterService.listContexts();
 
     if (result.success) {
-      this.logger.info('Contexts listed successfully', {
-        requestId: context.requestId,
-        count: result.data.length
-      });
-
       const response: ContextListResult = {
         success: true,
         contexts: result.data.map(ctx => ({
@@ -175,19 +150,9 @@ export class InterpreterHandler extends BaseHandler<Request, Response> {
   }
 
   private async handleDeleteContext(request: Request, context: RequestContext, contextId: string): Promise<Response> {
-    this.logger.info('Deleting context', {
-      requestId: context.requestId,
-      contextId
-    });
-
     const result = await this.interpreterService.deleteContext(contextId);
 
     if (result.success) {
-      this.logger.info('Context deleted successfully', {
-        requestId: context.requestId,
-        contextId,
-      });
-
       const response: ContextDeleteResult = {
         success: true,
         contextId: contextId,
@@ -214,13 +179,6 @@ export class InterpreterHandler extends BaseHandler<Request, Response> {
       language?: string;
     }>(request);
 
-    this.logger.info('Executing code', {
-      requestId: context.requestId,
-      contextId: body.context_id,
-      language: body.language,
-      codeLength: body.code.length
-    });
-
     // The service returns a Response directly for streaming
     // No need to wrap with ServiceResult as it's already handled
     const response = await this.interpreterService.executeCode(
@@ -235,11 +193,6 @@ export class InterpreterHandler extends BaseHandler<Request, Response> {
         requestId: context.requestId,
         contextId: body.context_id,
         status: response.status,
-      });
-    } else {
-      this.logger.info('Code execution started', {
-        requestId: context.requestId,
-        contextId: body.context_id,
       });
     }
 

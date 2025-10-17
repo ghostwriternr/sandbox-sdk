@@ -40,8 +40,6 @@ export class SessionHandler extends BaseHandler<Request, Response> {
   }
 
   private async handleCreate(request: Request, context: RequestContext): Promise<Response> {
-    this.logger.info('Creating new session', { requestId: context.requestId });
-
     // Parse request body for session options
     let sessionId: string;
     let env: Record<string, string>;
@@ -66,11 +64,6 @@ export class SessionHandler extends BaseHandler<Request, Response> {
     });
 
     if (result.success) {
-      this.logger.info('Session created successfully', {
-        requestId: context.requestId,
-        sessionId: sessionId
-      });
-
       // Note: Returning the Session object directly for now
       // This matches current test expectations
       const response = {
@@ -92,16 +85,9 @@ export class SessionHandler extends BaseHandler<Request, Response> {
   }
 
   private async handleList(request: Request, context: RequestContext): Promise<Response> {
-    this.logger.info('Listing sessions', { requestId: context.requestId });
-
     const result = await this.sessionManager.listSessions();
 
     if (result.success) {
-      this.logger.info('Sessions listed successfully', {
-        requestId: context.requestId,
-        count: result.data.length
-      });
-
       const response: SessionListResult = {
         success: true,
         data: result.data,
