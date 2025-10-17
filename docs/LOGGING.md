@@ -444,8 +444,8 @@ function getDefaultLogLevel(): string {
 }
 
 function isPrettyPrintEnabled(): boolean {
-  // Check explicit LOG_FORMAT env var
-  const format = getEnvVar('LOG_FORMAT');
+  // Check explicit SANDBOX_LOG_FORMAT env var
+  const format = getEnvVar('SANDBOX_LOG_FORMAT');
   if (format) {
     return format.toLowerCase() === 'pretty';
   }
@@ -490,21 +490,21 @@ function getEnvVar(name: string): string | undefined {
 **Environment Detection**:
 - **Local Development** (`wrangler dev` or `npm run dev`):
   - `LOG_LEVEL`: `debug` (default)
-  - `LOG_FORMAT`: `pretty` (auto-detected)
+  - `SANDBOX_LOG_FORMAT`: `pretty` (auto-detected)
   - Result: Colored, human-readable logs
 
 - **Production** (deployed to Cloudflare):
   - `LOG_LEVEL`: `info` (default)
-  - `LOG_FORMAT`: `json` (auto-detected)
+  - `SANDBOX_LOG_FORMAT`: `json` (auto-detected)
   - Result: Structured JSON logs
 
 **Override Options**:
 ```bash
 # Force JSON in local development
-LOG_FORMAT=json npm run dev
+SANDBOX_LOG_FORMAT=json npm run dev
 
 # Force pretty in production (not recommended)
-LOG_FORMAT=pretty wrangler deploy
+SANDBOX_LOG_FORMAT=pretty wrangler deploy
 
 # Set log level explicitly
 LOG_LEVEL=error npm run dev

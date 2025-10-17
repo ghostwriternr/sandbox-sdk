@@ -9,7 +9,6 @@ import type {
   ExecutionResult,
   ExecutionSession,
   ISandbox,
-  LogContext,
   Process,
   ProcessOptions,
   ProcessStatus,
@@ -17,7 +16,7 @@ import type {
   SessionOptions,
   StreamOptions
 } from "@repo/shared";
-import { createLogger, getLogger, runWithLogger, TraceContext } from "@repo/shared";
+import { createLogger, runWithLogger, TraceContext } from "@repo/shared";
 import { type ExecuteResponse, SandboxClient } from "./clients";
 import type { ErrorResponse } from './errors';
 import { CustomDomainRequiredError, ErrorCode } from './errors';
@@ -54,11 +53,20 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
   constructor(ctx: DurableObject['ctx'], env: Env) {
     super(ctx, env);
 
-    // Initialize logger in constructor to avoid type resolution issues
+    const envObj = env as any;
+    // Set sandbox environment variables from env object
+    const sandboxEnvKeys = ['SANDBOX_LOG_LEVEL', 'SANDBOX_LOG_FORMAT'] as const;
+    sandboxEnvKeys.forEach(key => {
+      if (envObj?.[key]) {
+        this.envVars[key] = envObj[key];
+      }
+    });
+
     this.logger = createLogger({
       component: 'sandbox-do',
       sandboxId: this.ctx.id.toString()
     });
+
     this.client = new SandboxClient({
       logger: this.logger,
       port: 3000, // Control plane port

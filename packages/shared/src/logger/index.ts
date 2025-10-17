@@ -182,11 +182,11 @@ export function createLogger(
 /**
  * Get log level from environment variable
  *
- * Checks LOG_LEVEL env var, falls back to default based on environment.
+ * Checks SANDBOX_LOG_LEVEL env var, falls back to default based on environment.
  * Default: 'debug' for development, 'info' for production
  */
 function getLogLevelFromEnv(): LogLevel {
-  const envLevel = getEnvVar('LOG_LEVEL') || getDefaultLogLevel();
+  const envLevel = getEnvVar('SANDBOX_LOG_LEVEL') || 'info';
 
   switch (envLevel.toLowerCase()) {
     case 'debug':
@@ -204,55 +204,20 @@ function getLogLevelFromEnv(): LogLevel {
 }
 
 /**
- * Get default log level based on environment
- */
-function getDefaultLogLevel(): string {
-  return isProduction() ? 'info' : 'debug';
-}
-
-/**
  * Check if pretty printing should be enabled
  *
- * Checks LOG_FORMAT env var, falls back to auto-detection:
+ * Checks SANDBOX_LOG_FORMAT env var, falls back to auto-detection:
  * - Local development: pretty (colored, human-readable)
  * - Production: json (structured)
  */
 function isPrettyPrintEnabled(): boolean {
-  // Check explicit LOG_FORMAT env var
-  const format = getEnvVar('LOG_FORMAT');
+  // Check explicit SANDBOX_LOG_FORMAT env var
+  const format = getEnvVar('SANDBOX_LOG_FORMAT');
   if (format) {
     return format.toLowerCase() === 'pretty';
   }
 
-  // Auto-detect: pretty in local development, JSON in production
-  return !isProduction();
-}
-
-/**
- * Detect if running in production environment
- *
- * Detection strategy:
- * 1. Check NODE_ENV if available (Node.js / Bun)
- * 2. Detect Cloudflare Workers environment via globalThis APIs
- * 3. Default to production if Cloudflare APIs detected
- */
-function isProduction(): boolean {
-  // Check NODE_ENV if available (container/local)
-  const nodeEnv = getEnvVar('NODE_ENV');
-  if (nodeEnv) {
-    return nodeEnv === 'production';
-  }
-
-  // Detect Cloudflare Workers environment
-  // In Workers, globalThis has specific Cloudflare APIs
-  const global = globalThis as any;
-  const hasCloudflareAPIs =
-    typeof global.caches !== 'undefined' &&
-    typeof global.Response !== 'undefined' &&
-    typeof global.Request !== 'undefined';
-
-  // Default: assume production if Cloudflare APIs detected
-  return hasCloudflareAPIs;
+  return false;
 }
 
 /**
