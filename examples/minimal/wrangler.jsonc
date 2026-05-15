@@ -4,6 +4,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-05-06",
   "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "SANDBOX_TRANSPORT": "rpc"
+  },
   "observability": {
     "enabled": true
   },
@@ -11,7 +14,7 @@
     {
       "class_name": "Sandbox",
       "image": "./Dockerfile",
-      "instance_type": "lite",
+      "instance_type": "standard-1",
       "max_instances": 1
     }
   ],

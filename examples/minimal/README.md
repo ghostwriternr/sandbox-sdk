@@ -1,92 +1,98 @@
 # Minimal Sandbox SDK Example
 
-A minimal Cloudflare Worker that demonstrates the core capabilities of the Sandbox SDK.
+A minimal Cloudflare Worker configured to stress-test Sandbox SDK file reads.
 
-## Features
+## What It Tests
 
-- **Command Execution**: Execute Python code in isolated containers
-- **File Operations**: Read and write files in the sandbox filesystem
-- **Simple API**: Two endpoints demonstrating basic sandbox operations
-
-## How It Works
-
-This example provides two simple endpoints:
-
-1. **`/run`** - Executes Python code and returns the output
-2. **`/file`** - Creates a file, reads it back, and returns the contents
+The Worker exposes a perf endpoint that launches many `sandbox.readFile()` calls at the same time against a small file in the sandbox filesystem. It is useful for observing how a single `standard-1` Sandbox container behaves under high read concurrency.
 
 ## API Endpoints
 
-### Execute Python Code
+### Concurrent readFile perf test
 
 ```bash
-GET http://localhost:8787/run
+GET /perf?count=10000
 ```
 
-Runs `python -c "print(2 + 2)"` and returns:
+`count` is optional and defaults to `10000`. Values above `10000` are clamped to `10000`.
+
+Example:
+
+```bash
+curl 'http://localhost:8787/perf?count=10000'
+```
+
+Response shape:
 
 ```json
 {
-  "output": "4\n",
-  "success": true
+  "count": 10000,
+  "requestedCount": "10000",
+  "clamped": false,
+  "successfulReads": 10000,
+  "failedReads": 0,
+  "durationMs": 1234.56,
+  "readsPerSecond": 8099.97,
+  "expectedContentLength": 43,
+  "sampleContentLength": 43,
+  "errorSamples": []
 }
 ```
 
-### File Operations
+### Destroy the sandbox
 
 ```bash
-GET http://localhost:8787/file
+POST /destroy
 ```
 
-Creates `/workspace/hello.txt`, reads it back, and returns:
+Use this between perf runs when you want the next `/perf` request to start from a fresh sandbox container.
+
+Example:
+
+```bash
+curl -X POST 'http://localhost:8787/destroy'
+```
+
+Response shape:
 
 ```json
 {
-  "content": "Hello, Sandbox!"
+  "destroyed": true,
+  "sandboxId": "my-sandbox",
+  "durationMs": 123.45
 }
 ```
 
 ## Setup
 
-1. From the project root, run:
+From the project root, install dependencies and build packages:
 
 ```bash
 npm install
 npm run build
 ```
 
-2. Run locally:
+## Run Locally
 
 ```bash
-cd examples/minimal # if you're not already here
+cd examples/minimal
 npm run dev
 ```
 
-The first run will build the Docker container (2-3 minutes). Subsequent runs are much faster.
-
-## Testing
-
-```bash
-# Test command execution
-curl http://localhost:8787/run
-
-# Test file operations
-curl http://localhost:8787/file
-```
+The first run builds the Docker container. Subsequent runs reuse the cached image unless the SDK or Dockerfile changes.
 
 ## Deploy
+
+Deploy with Wrangler from this directory:
 
 ```bash
 npm run deploy
 ```
 
-After first deployment, wait 2-3 minutes for container provisioning before making requests.
+Before deploying, confirm Wrangler is authenticated to the intended Cloudflare account:
 
-## Next Steps
+```bash
+wrangler whoami
+```
 
-This minimal example is the starting point for more complex applications. See the [Sandbox SDK documentation](https://developers.cloudflare.com/sandbox/) for:
-
-- Advanced command execution and streaming
-- Background processes
-- Preview URLs for exposed services
-- Custom Docker images
+After first deployment, wait a few minutes for container provisioning before making requests.
