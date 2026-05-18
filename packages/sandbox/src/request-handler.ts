@@ -1,5 +1,4 @@
-import { switchPort } from '@cloudflare/containers';
-import { createLogger, type LogContext, TraceContext } from '@repo/shared';
+import { createLogger, TraceContext } from '@repo/shared';
 import { getSandbox, type Sandbox } from './sandbox';
 import { sanitizeSandboxId, validatePort } from './security';
 
@@ -13,6 +12,11 @@ export interface RouteInfo {
   path: string;
   token: string;
 }
+
+export const PREVIEW_PROXY_HEADER = 'x-sandbox-preview-proxy';
+export const PREVIEW_PROXY_PORT_HEADER = 'x-sandbox-preview-port';
+export const PREVIEW_PROXY_TOKEN_HEADER = 'x-sandbox-preview-token';
+export const PREVIEW_PROXY_SANDBOX_ID_HEADER = 'x-sandbox-preview-sandbox-id';
 
 export async function proxyToSandbox<
   T extends Sandbox<any>,
@@ -35,81 +39,18 @@ export async function proxyToSandbox<
       return null; // Not a request to an exposed container port
     }
 
-    const { sandboxId, port, path, token } = routeInfo;
+    const { sandboxId, port, token } = routeInfo;
     // Preview URLs always use normalized (lowercase) IDs
     const sandbox = getSandbox(env.Sandbox, sandboxId, { normalizeId: true });
 
-    // Critical security check: Validate token (mandatory for all user ports)
-    // Skip check for control plane port 3000
-    if (port !== 3000) {
-      // Validate the token matches the port
-      const isValidToken = await sandbox.validatePortToken(port, token);
-      if (!isValidToken) {
-        logger.warn('Invalid token access blocked', {
-          port,
-          sandboxId,
-          path,
-          hostname: url.hostname,
-          url: request.url,
-          method: request.method,
-          userAgent: request.headers.get('User-Agent') || 'unknown'
-        });
+    const headers = new Headers(request.headers);
+    headers.set(PREVIEW_PROXY_HEADER, '1');
+    headers.set(PREVIEW_PROXY_PORT_HEADER, port.toString());
+    headers.set(PREVIEW_PROXY_TOKEN_HEADER, token);
+    headers.set(PREVIEW_PROXY_SANDBOX_ID_HEADER, sandboxId);
 
-        return new Response(
-          JSON.stringify({
-            error: `Access denied: Invalid token or port not exposed`,
-            code: 'INVALID_TOKEN'
-          }),
-          {
-            status: 404,
-            headers: {
-              'Content-Type': 'application/json'
-            }
-          }
-        );
-      }
-    }
-
-    // Detect WebSocket upgrade request
-    const upgradeHeader = request.headers.get('Upgrade');
-    if (upgradeHeader?.toLowerCase() === 'websocket') {
-      // WebSocket path: Must use fetch() not containerFetch()
-      // This bypasses JSRPC serialization boundary which cannot handle WebSocket upgrades
-      return await sandbox.fetch(switchPort(request, port));
-    }
-
-    // Build proxy request with proper headers
-    let proxyUrl: string;
-
-    // Route based on the target port
-    if (port !== 3000) {
-      // Route directly to user's service on the specified port
-      proxyUrl = `http://localhost:${port}${path}${url.search}`;
-    } else {
-      // Port 3000 is our control plane - route normally
-      proxyUrl = `http://localhost:3000${path}${url.search}`;
-    }
-
-    const headers: Record<string, string> = {
-      'X-Original-URL': request.url,
-      'X-Forwarded-Host': url.hostname,
-      'X-Forwarded-Proto': url.protocol.replace(':', ''),
-      'X-Sandbox-Name': sandboxId
-    };
-    request.headers.forEach((value, key) => {
-      headers[key] = value;
-    });
-
-    const proxyRequest = new Request(proxyUrl, {
-      method: request.method,
-      headers,
-      body: request.body,
-      // @ts-expect-error - duplex required for body streaming in modern runtimes
-      duplex: 'half',
-      redirect: 'manual' // Do not follow redirects, return them to the client to handle
-    });
-
-    return await sandbox.containerFetch(proxyRequest, port);
+    const previewRequest = new Request(request, { headers });
+    return await sandbox.fetch(previewRequest);
   } catch (error) {
     logger.error(
       'Proxy routing error',
@@ -128,7 +69,6 @@ function extractSandboxRoute(url: URL): RouteInfo | null {
   }
 
   const subdomain = url.hostname.slice(0, dotIndex);
-  const domain = url.hostname.slice(dotIndex + 1);
 
   // Extract port (digits at start followed by hyphen)
   const firstHyphen = subdomain.indexOf('-');
