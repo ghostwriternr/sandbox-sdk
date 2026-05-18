@@ -171,6 +171,32 @@ describe('proxyToSandbox - preview URL routing', () => {
         'token12345678901'
       );
     });
+
+    it('overwrites spoofed internal preview headers with parsed route values', async () => {
+      const request = new Request(
+        'https://8080-test-sandbox-token12345678901.example.com/hello',
+        {
+          headers: {
+            'x-sandbox-preview-proxy': '0',
+            'x-sandbox-preview-port': '9999',
+            'x-sandbox-preview-token': 'wrongtoken',
+            'x-sandbox-preview-sandbox-id': 'wrong-sandbox'
+          }
+        }
+      );
+
+      await proxyToSandbox(request, mockEnv);
+
+      const forwarded = getForwardedRequest();
+      expect(forwarded.headers.get('x-sandbox-preview-proxy')).toBe('1');
+      expect(forwarded.headers.get('x-sandbox-preview-port')).toBe('8080');
+      expect(forwarded.headers.get('x-sandbox-preview-token')).toBe(
+        'token12345678901'
+      );
+      expect(forwarded.headers.get('x-sandbox-preview-sandbox-id')).toBe(
+        'test-sandbox'
+      );
+    });
   });
 
   describe('Sandbox response forwarding', () => {

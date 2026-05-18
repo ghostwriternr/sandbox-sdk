@@ -1,4 +1,11 @@
 import { createLogger, TraceContext } from '@repo/shared';
+import {
+  PREVIEW_PROXY_HEADER,
+  PREVIEW_PROXY_HEADERS,
+  PREVIEW_PROXY_PORT_HEADER,
+  PREVIEW_PROXY_SANDBOX_ID_HEADER,
+  PREVIEW_PROXY_TOKEN_HEADER
+} from './preview-proxy-protocol';
 import { getSandbox, type Sandbox } from './sandbox';
 import { sanitizeSandboxId, validatePort } from './security';
 
@@ -6,31 +13,26 @@ export interface SandboxEnv<T extends Sandbox<any> = Sandbox<any>> {
   Sandbox: DurableObjectNamespace<T>;
 }
 
-export interface RouteInfo {
+interface RouteInfo {
   port: number;
   sandboxId: string;
-  path: string;
   token: string;
 }
 
-export const PREVIEW_PROXY_HEADER = 'x-sandbox-preview-proxy';
-export const PREVIEW_PROXY_PORT_HEADER = 'x-sandbox-preview-port';
-export const PREVIEW_PROXY_TOKEN_HEADER = 'x-sandbox-preview-token';
-export const PREVIEW_PROXY_SANDBOX_ID_HEADER = 'x-sandbox-preview-sandbox-id';
+function createProxyLogger(request: Request) {
+  const traceId =
+    TraceContext.fromHeaders(request.headers) || TraceContext.generate();
+  return createLogger({
+    component: 'sandbox-do',
+    traceId,
+    operation: 'proxy'
+  });
+}
 
 export async function proxyToSandbox<
   T extends Sandbox<any>,
   E extends SandboxEnv<T>
 >(request: Request, env: E): Promise<Response | null> {
-  // Create logger context for this request
-  const traceId =
-    TraceContext.fromHeaders(request.headers) || TraceContext.generate();
-  const logger = createLogger({
-    component: 'sandbox-do',
-    traceId,
-    operation: 'proxy'
-  });
-
   try {
     const url = new URL(request.url);
     const routeInfo = extractSandboxRoute(url);
@@ -44,6 +46,9 @@ export async function proxyToSandbox<
     const sandbox = getSandbox(env.Sandbox, sandboxId, { normalizeId: true });
 
     const headers = new Headers(request.headers);
+    for (const header of PREVIEW_PROXY_HEADERS) {
+      headers.delete(header);
+    }
     headers.set(PREVIEW_PROXY_HEADER, '1');
     headers.set(PREVIEW_PROXY_PORT_HEADER, port.toString());
     headers.set(PREVIEW_PROXY_TOKEN_HEADER, token);
@@ -52,6 +57,7 @@ export async function proxyToSandbox<
     const previewRequest = new Request(request, { headers });
     return await sandbox.fetch(previewRequest);
   } catch (error) {
+    const logger = createProxyLogger(request);
     logger.error(
       'Proxy routing error',
       error instanceof Error ? error : new Error(String(error))
@@ -97,7 +103,8 @@ function extractSandboxRoute(url: URL): RouteInfo | null {
   const token = rest.slice(lastHyphen + 1);
 
   // No hyphens in tokens: URL is {port}-{sandboxId}-{token}.{domain}
-  // We split at the LAST hyphen, so hyphens in tokens would be ambiguous
+  // We split at the LAST hyphen, so hyphens in tokens would be ambiguous.
+  // The SDK issues tokens up to 16 chars; 63 is the DNS label component limit.
   if (!/^[a-z0-9_]+$/.test(token) || token.length === 0 || token.length > 63) {
     return null;
   }
@@ -117,35 +124,6 @@ function extractSandboxRoute(url: URL): RouteInfo | null {
   return {
     port,
     sandboxId: sanitizedSandboxId,
-    path: url.pathname || '/',
     token
   };
-}
-
-export function isLocalhostPattern(hostname: string): boolean {
-  // Handle IPv6 addresses in brackets (with or without port)
-  if (hostname.startsWith('[')) {
-    if (hostname.includes(']:')) {
-      // [::1]:port format
-      const ipv6Part = hostname.substring(0, hostname.indexOf(']:') + 1);
-      return ipv6Part === '[::1]';
-    } else {
-      // [::1] format without port
-      return hostname === '[::1]';
-    }
-  }
-
-  // Handle bare IPv6 without brackets
-  if (hostname === '::1') {
-    return true;
-  }
-
-  // For IPv4 and regular hostnames, split on colon to remove port
-  const hostPart = hostname.split(':')[0];
-
-  return (
-    hostPart === 'localhost' ||
-    hostPart === '127.0.0.1' ||
-    hostPart === '0.0.0.0'
-  );
 }

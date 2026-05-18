@@ -88,6 +88,44 @@ interface MockCtx {
   };
 }
 
+const PREVIEW_TEST_PORT = 8080;
+const PREVIEW_TEST_TOKEN = 'token12345678901';
+const PREVIEW_TEST_RUNTIME_ID = 'runtime-1';
+
+function activePreviewStorageState({
+  port = PREVIEW_TEST_PORT,
+  token = PREVIEW_TEST_TOKEN,
+  runtimeIdentityID = PREVIEW_TEST_RUNTIME_ID
+}: {
+  port?: number;
+  token?: string;
+  runtimeIdentityID?: string;
+} = {}) {
+  return {
+    portTokens: {
+      [port.toString()]: { token }
+    },
+    currentRuntimeIdentity: {
+      id: runtimeIdentityID
+    },
+    activePreviewPorts: {
+      [port.toString()]: {
+        runtimeIdentityID,
+        token
+      }
+    }
+  };
+}
+
+function mockPreviewStorageGet(
+  mockCtx: MockCtx,
+  state: Partial<ReturnType<typeof activePreviewStorageState>>
+): void {
+  vi.mocked(mockCtx.storage.get).mockImplementation(
+    async (key) => state[key as keyof typeof state] ?? null
+  );
+}
+
 describe('Sandbox - Automatic Session Management', () => {
   let sandbox: Sandbox;
   let mockCtx: MockCtx;
@@ -928,24 +966,7 @@ describe('Sandbox - Automatic Session Management', () => {
 
     it('routes active preview proxy requests through fetchIfRunning', async () => {
       (mockCtx as any).container = { running: true };
-      vi.mocked(mockCtx.storage!.get).mockImplementation(async (key) => {
-        if (key === 'portTokens') {
-          return { '8080': { token: 'token12345678901' } };
-        }
-        if (key === 'currentRuntimeIdentity') {
-          return { id: 'runtime-1', startedAt: 123 };
-        }
-        if (key === 'activePreviewPorts') {
-          return {
-            '8080': {
-              runtimeIdentityID: 'runtime-1',
-              token: 'token12345678901',
-              activatedAt: 124
-            }
-          };
-        }
-        return null;
-      });
+      mockPreviewStorageGet(mockCtx, activePreviewStorageState());
       const fetchIfRunningSpy = vi
         .spyOn(sandbox, 'fetchIfRunning')
         .mockResolvedValue(new Response('preview ok'));
@@ -959,7 +980,7 @@ describe('Sandbox - Automatic Session Management', () => {
               'x-sandbox-preview-proxy': '1',
               'x-sandbox-preview-port': '8080',
               'x-sandbox-preview-token': 'token12345678901',
-              'x-sandbox-preview-sandbox-id': 'test-sandbox'
+              'x-sandbox-preview-sandbox-id': 'spoofed-sandbox'
             }
           }
         )
@@ -967,30 +988,17 @@ describe('Sandbox - Automatic Session Management', () => {
 
       expect(await response.text()).toBe('preview ok');
       expect(fetchIfRunningSpy).toHaveBeenCalledTimes(1);
+      const forwardedRequest = fetchIfRunningSpy.mock.calls[0][0] as Request;
+      expect(forwardedRequest.headers.get('X-Sandbox-Name')).toBe(
+        'test-sandbox'
+      );
       expect(fetchIfRunningSpy).toHaveBeenCalledWith(expect.any(Request), 8080);
       expect(containerFetchSpy).not.toHaveBeenCalled();
     });
 
     it('preserves WebSocket preview proxy requests when forwarding', async () => {
       (mockCtx as any).container = { running: true };
-      vi.mocked(mockCtx.storage!.get).mockImplementation(async (key) => {
-        if (key === 'portTokens') {
-          return { '8080': { token: 'token12345678901' } };
-        }
-        if (key === 'currentRuntimeIdentity') {
-          return { id: 'runtime-1', startedAt: 123 };
-        }
-        if (key === 'activePreviewPorts') {
-          return {
-            '8080': {
-              runtimeIdentityID: 'runtime-1',
-              token: 'token12345678901',
-              activatedAt: 124
-            }
-          };
-        }
-        return null;
-      });
+      mockPreviewStorageGet(mockCtx, activePreviewStorageState());
       const fetchIfRunningSpy = vi
         .spyOn(sandbox, 'fetchIfRunning')
         .mockResolvedValue(new Response('preview websocket ok'));
@@ -1029,24 +1037,7 @@ describe('Sandbox - Automatic Session Management', () => {
 
     it('returns user 503 responses when the runtime remains active', async () => {
       (mockCtx as any).container = { running: true };
-      vi.mocked(mockCtx.storage!.get).mockImplementation(async (key) => {
-        if (key === 'portTokens') {
-          return { '8080': { token: 'token12345678901' } };
-        }
-        if (key === 'currentRuntimeIdentity') {
-          return { id: 'runtime-1', startedAt: 123 };
-        }
-        if (key === 'activePreviewPorts') {
-          return {
-            '8080': {
-              runtimeIdentityID: 'runtime-1',
-              token: 'token12345678901',
-              activatedAt: 124
-            }
-          };
-        }
-        return null;
-      });
+      mockPreviewStorageGet(mockCtx, activePreviewStorageState());
       vi.spyOn(sandbox, 'fetchIfRunning').mockResolvedValue(
         new Response('service temporarily unavailable', { status: 503 })
       );
@@ -1073,24 +1064,15 @@ describe('Sandbox - Automatic Session Management', () => {
       (mockCtx as any).container = { running: true };
       let runtimeActive = true;
       vi.mocked(mockCtx.storage!.get).mockImplementation(async (key) => {
-        if (key === 'portTokens') {
-          return { '8080': { token: 'token12345678901' } };
-        }
+        const state = activePreviewStorageState();
         if (key === 'currentRuntimeIdentity') {
-          return runtimeActive ? { id: 'runtime-1', startedAt: 123 } : null;
+          return runtimeActive ? state.currentRuntimeIdentity : null;
         }
-        if (key === 'activePreviewPorts') {
-          return {
-            '8080': {
-              runtimeIdentityID: 'runtime-1',
-              token: 'token12345678901',
-              activatedAt: 124
-            }
-          };
-        }
-        return null;
+        return state[key as keyof typeof state] ?? null;
       });
       vi.spyOn(sandbox, 'fetchIfRunning').mockImplementation(async () => {
+        // Simulate the runtime going inactive after preview validation but
+        // before the post-forward liveness check.
         runtimeActive = false;
         return new Response('Container is not running', { status: 503 });
       });
@@ -1149,7 +1131,7 @@ describe('Sandbox - Automatic Session Management', () => {
           return { '8080': { token: 'token12345678901' } };
         }
         if (key === 'currentRuntimeIdentity') {
-          return { id: 'runtime-1', startedAt: 123 };
+          return { id: 'runtime-1' };
         }
         if (key === 'activePreviewPorts') {
           return {};
@@ -1560,8 +1542,7 @@ describe('Sandbox - Automatic Session Management', () => {
       expect(mockCtx.storage.put).toHaveBeenCalledWith(
         'currentRuntimeIdentity',
         expect.objectContaining({
-          id: expect.any(String),
-          startedAt: expect.any(Number)
+          id: expect.any(String)
         })
       );
       expect(sandbox.client.ports.getExposedPorts).not.toHaveBeenCalled();
@@ -1631,7 +1612,7 @@ describe('Sandbox - Automatic Session Management', () => {
           return {};
         }
         if (key === 'currentRuntimeIdentity') {
-          return { id: 'runtime-1', startedAt: 123 };
+          return { id: 'runtime-1' };
         }
         if (key === 'activePreviewPorts') {
           return {};
@@ -1652,9 +1633,7 @@ describe('Sandbox - Automatic Session Management', () => {
       expect(putSpy).toHaveBeenCalledWith('activePreviewPorts', {
         '8080': {
           runtimeIdentityID: 'runtime-1',
-          token: 'friendlytok',
-          activatedAt: expect.any(Number),
-          name: 'my-api'
+          token: 'friendlytok'
         }
       });
     });
@@ -1665,7 +1644,7 @@ describe('Sandbox - Automatic Session Management', () => {
           return { '8080': { token: 'stabletok' } };
         }
         if (key === 'currentRuntimeIdentity') {
-          return { id: 'runtime-1', startedAt: 123 };
+          return { id: 'runtime-1' };
         }
         if (key === 'activePreviewPorts') {
           return {};
@@ -1794,7 +1773,7 @@ describe('Sandbox - Automatic Session Management', () => {
     it('lists only ports activated for the current runtime without contacting the container', async () => {
       vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
         if (key === 'currentRuntimeIdentity') {
-          return { id: 'runtime-1', startedAt: 123 };
+          return { id: 'runtime-1' };
         }
         if (key === 'portTokens') {
           return {
@@ -1806,14 +1785,11 @@ describe('Sandbox - Automatic Session Management', () => {
           return {
             '8080': {
               runtimeIdentityID: 'runtime-1',
-              token: 'tok8080',
-              activatedAt: 456,
-              name: 'api'
+              token: 'tok8080'
             },
             '9090': {
               runtimeIdentityID: 'runtime-old',
-              token: 'tok9090',
-              activatedAt: 456
+              token: 'tok9090'
             }
           };
         }
@@ -1842,8 +1818,7 @@ describe('Sandbox - Automatic Session Management', () => {
           return {
             '8080': {
               runtimeIdentityID: 'runtime-1',
-              token: 'tok8080',
-              activatedAt: 456
+              token: 'tok8080'
             }
           };
         }
@@ -1858,7 +1833,7 @@ describe('Sandbox - Automatic Session Management', () => {
     it('omits durable auth without matching current-runtime activation', async () => {
       vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
         if (key === 'currentRuntimeIdentity') {
-          return { id: 'runtime-1', startedAt: 123 };
+          return { id: 'runtime-1' };
         }
         if (key === 'portTokens') {
           return { '8080': { token: 'tok8080' } };
@@ -1888,7 +1863,7 @@ describe('Sandbox - Automatic Session Management', () => {
     it('returns true only for durable auth activated in the current runtime', async () => {
       vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
         if (key === 'currentRuntimeIdentity') {
-          return { id: 'runtime-1', startedAt: 123 };
+          return { id: 'runtime-1' };
         }
         if (key === 'portTokens') {
           return { '8080': { token: 'tok8080' } };
@@ -1897,8 +1872,7 @@ describe('Sandbox - Automatic Session Management', () => {
           return {
             '8080': {
               runtimeIdentityID: 'runtime-1',
-              token: 'tok8080',
-              activatedAt: 456
+              token: 'tok8080'
             }
           };
         }
@@ -1913,7 +1887,7 @@ describe('Sandbox - Automatic Session Management', () => {
     it('returns false for durable auth without activation', async () => {
       vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
         if (key === 'currentRuntimeIdentity') {
-          return { id: 'runtime-1', startedAt: 123 };
+          return { id: 'runtime-1' };
         }
         if (key === 'portTokens') {
           return { '8080': { token: 'tok8080' } };
@@ -1932,7 +1906,7 @@ describe('Sandbox - Automatic Session Management', () => {
     it('returns false for activation from an old runtime', async () => {
       vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
         if (key === 'currentRuntimeIdentity') {
-          return { id: 'runtime-1', startedAt: 123 };
+          return { id: 'runtime-1' };
         }
         if (key === 'portTokens') {
           return { '8080': { token: 'tok8080' } };
@@ -1941,8 +1915,7 @@ describe('Sandbox - Automatic Session Management', () => {
           return {
             '8080': {
               runtimeIdentityID: 'runtime-old',
-              token: 'tok8080',
-              activatedAt: 456
+              token: 'tok8080'
             }
           };
         }
@@ -1971,8 +1944,7 @@ describe('Sandbox - Automatic Session Management', () => {
           return {
             '8080': {
               runtimeIdentityID: 'runtime-1',
-              token: 'tok8080',
-              activatedAt: 456
+              token: 'tok8080'
             }
           };
         }
@@ -1991,7 +1963,7 @@ describe('Sandbox - Automatic Session Management', () => {
       const calls: string[] = [];
       vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
         if (key === 'currentRuntimeIdentity') {
-          return { id: 'runtime-1', startedAt: 123 };
+          return { id: 'runtime-1' };
         }
         if (key === 'portTokens') {
           return { '8080': { token: 'tok8080' } };
@@ -2000,8 +1972,7 @@ describe('Sandbox - Automatic Session Management', () => {
           return {
             '8080': {
               runtimeIdentityID: 'runtime-1',
-              token: 'tok8080',
-              activatedAt: 456
+              token: 'tok8080'
             }
           };
         }
@@ -2032,7 +2003,7 @@ describe('Sandbox - Automatic Session Management', () => {
     it('treats PortNotExposedError from an active runtime as success', async () => {
       vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
         if (key === 'currentRuntimeIdentity') {
-          return { id: 'runtime-1', startedAt: 123 };
+          return { id: 'runtime-1' };
         }
         if (key === 'portTokens') {
           return { '8080': { token: 'tok8080' } };
@@ -2060,7 +2031,7 @@ describe('Sandbox - Automatic Session Management', () => {
     it('rethrows non-PortNotExposedError failures from an active runtime', async () => {
       vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
         if (key === 'currentRuntimeIdentity') {
-          return { id: 'runtime-1', startedAt: 123 };
+          return { id: 'runtime-1' };
         }
         if (key === 'portTokens') {
           return { '8080': { token: 'tok8080' } };

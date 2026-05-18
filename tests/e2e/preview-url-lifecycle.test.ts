@@ -52,7 +52,6 @@ const server = Bun.serve({
     }
   }
 });
-console.log("Server listening on port " + server.port);
 await Bun.sleep(300000);
   `.trim();
 
@@ -70,7 +69,7 @@ await Bun.sleep(300000);
 async function startPreviewServer(
   workerUrl: string,
   headers: Record<string, string>
-): Promise<string> {
+): Promise<void> {
   await writePreviewServer(workerUrl, headers);
 
   const startResponse = await fetch(`${workerUrl}/api/process/start`, {
@@ -81,7 +80,7 @@ async function startPreviewServer(
     })
   });
   expect(startResponse.status).toBe(200);
-  const process = (await startResponse.json()) as Process;
+  const process = (await startResponse.json()) as Pick<Process, 'id'>;
 
   const waitPortResponse = await fetch(
     `${workerUrl}/api/process/${process.id}/waitForPort`,
@@ -96,8 +95,6 @@ async function startPreviewServer(
     }
   );
   expect(waitPortResponse.status).toBe(200);
-
-  return process.id;
 }
 
 async function exposeLifecyclePort(
@@ -220,6 +217,8 @@ describe('Preview URL lifecycle', () => {
     sandbox = await createTestSandbox();
     workerUrl = sandbox.workerUrl;
     headers = sandbox.headers(createUniqueSession());
+    // Port APIs use the sandbox's default session, while file/process setup
+    // uses the test session headers for deterministic workspace state.
     portHeaders = { ...headers };
     delete portHeaders['X-Session-Id'];
   }, 120000);
@@ -445,20 +444,26 @@ describe('Preview URL lifecycle', () => {
   test.skipIf(skipPortExposureTests)(
     'old preview URL is rejected after sandbox destroy',
     async () => {
-      await startPreviewServer(workerUrl, headers);
-      const previewUrl = await exposeLifecyclePort(workerUrl, portHeaders);
+      try {
+        await startPreviewServer(workerUrl, headers);
+        const previewUrl = await exposeLifecyclePort(workerUrl, portHeaders);
 
-      const cleanupResponse = await fetch(`${workerUrl}/cleanup`, {
-        method: 'POST',
-        headers: portHeaders
-      });
-      expect(cleanupResponse.status).toBe(200);
-      sandbox = null;
+        const cleanupResponse = await fetch(`${workerUrl}/cleanup`, {
+          method: 'POST',
+          headers: portHeaders
+        });
+        expect(cleanupResponse.status).toBe(200);
+        sandbox = null;
 
-      const response = await fetch(previewURL(previewUrl, '/hello'));
-      expect(response.status).toBe(404);
-      const body = (await response.json()) as { code?: string };
-      expect(body.code).toBe('INVALID_TOKEN');
+        const response = await fetch(previewURL(previewUrl, '/hello'));
+        expect(response.status).toBe(404);
+        const body = (await response.json()) as { code?: string };
+        expect(body.code).toBe('INVALID_TOKEN');
+      } finally {
+        if (sandbox !== null) {
+          await stopContainer(workerUrl, portHeaders).catch(() => undefined);
+        }
+      }
     },
     180000
   );

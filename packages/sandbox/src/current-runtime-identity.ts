@@ -4,7 +4,6 @@ export type RuntimeIdentityID = string & {
 
 export type RuntimeIdentityRecord = {
   id: RuntimeIdentityID;
-  startedAt: number;
 };
 
 export type RuntimeScoped<T extends object> = T & {
@@ -12,29 +11,30 @@ export type RuntimeScoped<T extends object> = T & {
 };
 
 export type CurrentRuntimeStatus =
-  | { status: 'active'; runtime: RuntimeIdentity; runtimeStatus: string }
+  | { status: 'active'; runtime: RuntimeIdentity; containerStatus: string }
   | {
       status: 'inactive';
       reason:
         | 'runtime-not-healthy'
         | 'runtime-not-running'
         | 'missing-runtime-id';
-      runtimeStatus?: string;
+      containerStatus?: string;
     };
 
 const CURRENT_RUNTIME_IDENTITY_STORAGE_KEY = 'currentRuntimeIdentity';
 
-function runtimeIdentityID(value: string): RuntimeIdentityID {
-  return value as RuntimeIdentityID;
+export class RuntimeIdentityInactiveError extends Error {
+  constructor() {
+    super('Runtime identity is no longer active');
+    this.name = 'RuntimeIdentityInactiveError';
+  }
 }
 
 export class RuntimeIdentity {
   readonly id: RuntimeIdentityID;
-  readonly startedAt: number;
 
   constructor(record: RuntimeIdentityRecord) {
     this.id = record.id;
-    this.startedAt = record.startedAt;
   }
 
   owns(record: { readonly runtimeIdentityID: RuntimeIdentityID }): boolean {
@@ -67,7 +67,7 @@ export class CurrentRuntimeIdentity {
       return {
         status: 'inactive',
         reason: 'runtime-not-healthy',
-        runtimeStatus: state.status
+        containerStatus: state.status
       };
     }
 
@@ -75,7 +75,7 @@ export class CurrentRuntimeIdentity {
       return {
         status: 'inactive',
         reason: 'runtime-not-running',
-        runtimeStatus: state.status
+        containerStatus: state.status
       };
     }
 
@@ -87,21 +87,20 @@ export class CurrentRuntimeIdentity {
       return {
         status: 'inactive',
         reason: 'missing-runtime-id',
-        runtimeStatus: state.status
+        containerStatus: state.status
       };
     }
 
     return {
       status: 'active',
       runtime: new RuntimeIdentity(record),
-      runtimeStatus: state.status
+      containerStatus: state.status
     };
   }
 
   async markStarted(): Promise<RuntimeIdentity> {
     const record: RuntimeIdentityRecord = {
-      id: runtimeIdentityID(crypto.randomUUID()),
-      startedAt: Date.now()
+      id: crypto.randomUUID() as RuntimeIdentityID
     };
     await this.storage.put(CURRENT_RUNTIME_IDENTITY_STORAGE_KEY, record);
     return new RuntimeIdentity(record);
@@ -118,7 +117,7 @@ export class CurrentRuntimeIdentity {
 
   async assertActive(runtime: RuntimeIdentity): Promise<void> {
     if (!(await this.isActive(runtime))) {
-      throw new Error('Runtime identity is no longer active');
+      throw new RuntimeIdentityInactiveError();
     }
   }
 }

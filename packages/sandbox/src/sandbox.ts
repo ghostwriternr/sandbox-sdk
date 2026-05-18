@@ -77,14 +77,14 @@ import {
 import { collectFile, streamFile } from './file-stream';
 import { CodeInterpreter } from './interpreter';
 import { LocalMountSyncManager } from './local-mount-sync';
-import { proxyTerminal } from './pty';
 import {
-  isLocalhostPattern,
   PREVIEW_PROXY_HEADER,
   PREVIEW_PROXY_PORT_HEADER,
   PREVIEW_PROXY_SANDBOX_ID_HEADER,
   PREVIEW_PROXY_TOKEN_HEADER
-} from './request-handler';
+} from './preview-proxy-protocol';
+import { isLocalhostPattern } from './preview-url';
+import { proxyTerminal } from './pty';
 import {
   SandboxSecurityError,
   sanitizeSandboxId,
@@ -127,7 +127,7 @@ type PortTokenEntry = {
   name?: string;
 };
 
-type PreviewURLValidation =
+type PreviewURLRuntimeValidation =
   | { status: 'invalid' }
   | {
       status: 'stale';
@@ -138,18 +138,12 @@ type PreviewURLValidation =
         | 'missing-activation'
         | 'runtime-mismatch'
         | 'token-mismatch';
-      runtimeStatus?: string;
+      containerStatus?: string;
     }
-  | { status: 'active' };
-
-type PreviewURLRuntimeValidation =
-  | Exclude<PreviewURLValidation, { status: 'active' }>
   | { status: 'active'; runtime: RuntimeIdentity };
 
 type PreviewPortActivation = RuntimeScoped<{
   token: string;
-  activatedAt: number;
-  name?: string;
 }>;
 
 type PreviewPortActivations = Record<string, PreviewPortActivation>;
@@ -159,6 +153,7 @@ type CurrentPreviewPort = {
   entry: PortTokenEntry;
 };
 
+const PORT_TOKENS_STORAGE_KEY = 'portTokens';
 const ACTIVE_PREVIEW_PORTS_STORAGE_KEY = 'activePreviewPorts';
 
 type SandboxConfiguration = {
@@ -1823,7 +1818,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       // teardown work. Concurrent preview traffic should observe missing
       // auth or runtime state and fail from DO-owned state without reaching
       // the container.
-      await this.ctx.storage.delete('portTokens');
+      await this.ctx.storage.delete(PORT_TOKENS_STORAGE_KEY);
       await this.clearActivePreviewPorts();
       await this.currentRuntime.clear();
 
@@ -1952,7 +1947,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
   private async readPortTokens(): Promise<Record<string, PortTokenEntry>> {
     const raw =
       (await this.ctx.storage.get<Record<string, string | PortTokenEntry>>(
-        'portTokens'
+        PORT_TOKENS_STORAGE_KEY
       )) ?? {};
     const normalized: Record<string, PortTokenEntry> = {};
     for (const [port, value] of Object.entries(raw)) {
@@ -2454,10 +2449,14 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     headers.set('X-Original-URL', request.url);
     headers.set('X-Forwarded-Host', url.hostname);
     headers.set('X-Forwarded-Proto', url.protocol.replace(':', ''));
-    headers.set('X-Sandbox-Name', sandboxId);
+    headers.set('X-Sandbox-Name', this.sandboxName ?? sandboxId);
 
     const upgradeHeader = request.headers.get('Upgrade');
     if (upgradeHeader?.toLowerCase() === 'websocket') {
+      // WebSocket upgrade requests keep the original Request object so the
+      // Workers runtime preserves upgrade semantics. fetchIfRunning() routes
+      // by the explicit port argument, while the request URL still provides
+      // the path and query.
       return new Request(request, {
         headers,
         redirect: 'manual'
@@ -2494,7 +2493,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       this.logger.warn('Stale preview URL blocked', {
         port,
         sandboxId,
-        runtimeStatus: validation.runtimeStatus,
+        containerStatus: validation.containerStatus,
         reason: validation.reason,
         method: request.method
       });
@@ -2506,9 +2505,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       port,
       sandboxId
     );
-    try {
-      await this.currentRuntime.assertActive(validation.runtime);
-    } catch {
+    if (!(await this.currentRuntime.isActive(validation.runtime))) {
       return this.stalePreviewURLResponse();
     }
 
@@ -3931,25 +3928,20 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       const sessionId = await this.ensureDefaultSession();
       let runtime = await this.currentRuntime.get();
 
-      await this.client.ports.exposePort(port, sessionId, options?.name);
+      await this.client.ports.exposePort(port, sessionId, options.name);
 
-      // Container startup usually records the runtime identity in onStart().
-      // The fallback records one for already-running containers whose identity
-      // is missing, and assertActive() keeps the storage write scoped to a
-      // still-live runtime.
+      // onStart() may record runtime identity while ensureDefaultSession() or
+      // exposePort() starts the container. Re-read once before falling back to
+      // markStarted() so normal start hooks remain the identity source.
       runtime = runtime ?? (await this.currentRuntime.get());
       runtime = runtime ?? (await this.currentRuntime.markStarted());
       await this.currentRuntime.assertActive(runtime);
 
-      tokens[port.toString()] = { token, name: options?.name };
+      tokens[port.toString()] = { token, name: options.name };
       const activations = await this.readActivePreviewPorts();
-      activations[port.toString()] = runtime.scope({
-        token,
-        activatedAt: Date.now(),
-        ...(options?.name !== undefined ? { name: options.name } : {})
-      });
+      activations[port.toString()] = runtime.scope({ token });
       await Promise.all([
-        this.ctx.storage.put('portTokens', tokens),
+        this.ctx.storage.put(PORT_TOKENS_STORAGE_KEY, tokens),
         this.writeActivePreviewPorts(activations)
       ]);
 
@@ -3965,7 +3957,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       return {
         url,
         port,
-        name: options?.name
+        name: options.name
       };
     } catch (error) {
       caughtError = error instanceof Error ? error : new Error(String(error));
@@ -3976,7 +3968,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
         outcome,
         port,
         durationMs: Date.now() - exposeStartTime,
-        name: options?.name,
+        name: options.name,
         hostname: options.hostname,
         error: caughtError
       });
@@ -4004,7 +3996,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       const tokens = await this.readPortTokens();
       if (tokens[port.toString()]) {
         delete tokens[port.toString()];
-        await this.ctx.storage.put('portTokens', tokens);
+        await this.ctx.storage.put(PORT_TOKENS_STORAGE_KEY, tokens);
       }
 
       const activations = await this.readActivePreviewPorts();
@@ -4157,16 +4149,16 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       return { status: 'invalid' };
     }
 
-    const runtimeStatus = await this.currentRuntime.getStatus();
-    if (runtimeStatus.status === 'inactive') {
+    const currentRuntimeStatus = await this.currentRuntime.getStatus();
+    if (currentRuntimeStatus.status === 'inactive') {
       return {
         status: 'stale',
-        reason: runtimeStatus.reason,
-        runtimeStatus: runtimeStatus.runtimeStatus
+        reason: currentRuntimeStatus.reason,
+        containerStatus: currentRuntimeStatus.containerStatus
       };
     }
 
-    const runtime = runtimeStatus.runtime;
+    const runtime = currentRuntimeStatus.runtime;
 
     const activations = await this.readActivePreviewPorts();
     const activation = activations[port.toString()];
@@ -4174,7 +4166,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       return {
         status: 'stale',
         reason: 'missing-activation',
-        runtimeStatus: runtimeStatus.runtimeStatus
+        containerStatus: currentRuntimeStatus.containerStatus
       };
     }
 
@@ -4182,7 +4174,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       return {
         status: 'stale',
         reason: 'runtime-mismatch',
-        runtimeStatus: runtimeStatus.runtimeStatus
+        containerStatus: currentRuntimeStatus.containerStatus
       };
     }
 
@@ -4191,10 +4183,14 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       token
     );
     if (!activationTokenMatches) {
+      this.logger.warn('Preview URL activation token mismatch', {
+        port,
+        runtimeIdentityID: runtime.id
+      });
       return {
         status: 'stale',
         reason: 'token-mismatch',
-        runtimeStatus: runtimeStatus.runtimeStatus
+        containerStatus: currentRuntimeStatus.containerStatus
       };
     }
 
@@ -4202,8 +4198,8 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
   }
 
   private async getCurrentPreviewPorts(): Promise<CurrentPreviewPort[]> {
-    const runtimeStatus = await this.currentRuntime.getStatus();
-    if (runtimeStatus.status === 'inactive') {
+    const currentRuntimeStatus = await this.currentRuntime.getStatus();
+    if (currentRuntimeStatus.status === 'inactive') {
       return [];
     }
 
@@ -4218,7 +4214,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
         continue;
       }
 
-      if (!runtimeStatus.runtime.owns(activation)) {
+      if (!currentRuntimeStatus.runtime.owns(activation)) {
         continue;
       }
 
