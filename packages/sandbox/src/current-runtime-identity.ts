@@ -11,6 +11,17 @@ export type RuntimeScoped<T extends object> = T & {
   readonly runtimeIdentityID: RuntimeIdentityID;
 };
 
+export type CurrentRuntimeStatus =
+  | { status: 'active'; runtime: RuntimeIdentity; runtimeStatus: string }
+  | {
+      status: 'inactive';
+      reason:
+        | 'runtime-not-healthy'
+        | 'runtime-not-running'
+        | 'missing-runtime-id';
+      runtimeStatus?: string;
+    };
+
 const CURRENT_RUNTIME_IDENTITY_STORAGE_KEY = 'currentRuntimeIdentity';
 
 function runtimeIdentityID(value: string): RuntimeIdentityID {
@@ -46,20 +57,45 @@ export class CurrentRuntimeIdentity {
   ) {}
 
   async get(): Promise<RuntimeIdentity | null> {
+    const status = await this.getStatus();
+    return status.status === 'active' ? status.runtime : null;
+  }
+
+  async getStatus(): Promise<CurrentRuntimeStatus> {
+    const state = await this.getContainerState();
+    if (state.status !== 'healthy') {
+      return {
+        status: 'inactive',
+        reason: 'runtime-not-healthy',
+        runtimeStatus: state.status
+      };
+    }
+
+    if (!this.isContainerRunning()) {
+      return {
+        status: 'inactive',
+        reason: 'runtime-not-running',
+        runtimeStatus: state.status
+      };
+    }
+
     const record =
       (await this.storage.get<RuntimeIdentityRecord>(
         CURRENT_RUNTIME_IDENTITY_STORAGE_KEY
       )) ?? null;
     if (!record) {
-      return null;
+      return {
+        status: 'inactive',
+        reason: 'missing-runtime-id',
+        runtimeStatus: state.status
+      };
     }
 
-    const state = await this.getContainerState();
-    if (state.status !== 'healthy' || !this.isContainerRunning()) {
-      return null;
-    }
-
-    return new RuntimeIdentity(record);
+    return {
+      status: 'active',
+      runtime: new RuntimeIdentity(record),
+      runtimeStatus: state.status
+    };
   }
 
   async markStarted(): Promise<RuntimeIdentity> {

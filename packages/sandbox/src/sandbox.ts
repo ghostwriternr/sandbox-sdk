@@ -154,6 +154,11 @@ type PreviewPortActivation = RuntimeScoped<{
 
 type PreviewPortActivations = Record<string, PreviewPortActivation>;
 
+type CurrentPreviewPort = {
+  port: number;
+  entry: PortTokenEntry;
+};
+
 const ACTIVE_PREVIEW_PORTS_STORAGE_KEY = 'activePreviewPorts';
 
 type SandboxConfiguration = {
@@ -2413,6 +2418,27 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     );
   }
 
+  /**
+   * Detects unavailable-container responses produced by `fetchIfRunning()` and
+   * its shared forwarding helper in `@cloudflare/containers`.
+   */
+  private async isContainerUnavailableResponse(
+    response: Response
+  ): Promise<boolean> {
+    if (response.status !== 500 && response.status !== 503) {
+      return false;
+    }
+
+    const body = await response
+      .clone()
+      .text()
+      .catch(() => null);
+    return (
+      body === 'Container is not running' ||
+      body === 'Container suddenly disconnected, try again'
+    );
+  }
+
   private buildPreviewProxyRequest(
     request: Request,
     port: number,
@@ -2488,7 +2514,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
 
     const response = await this.fetchIfRunning(proxyRequest, port);
     if (
-      (response.status === 500 || response.status === 503) &&
+      (await this.isContainerUnavailableResponse(response)) &&
       !(await this.currentRuntime.isActive(validation.runtime))
     ) {
       return this.stalePreviewURLResponse();
@@ -3987,14 +4013,18 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
         await this.writeActivePreviewPorts(activations);
       }
 
+      const runtime = await this.currentRuntime.get();
+      if (!runtime) {
+        outcome = 'success';
+        return;
+      }
+
       const sessionId = await this.ensureDefaultSession();
       try {
         await this.client.ports.unexposePort(port, sessionId);
       } catch (error) {
-        // A container that was asleep when we entered wakes with an
-        // empty exposed-port registry. We already cleared durable auth
-        // and activation state, so a "not exposed" response is the state
-        // we wanted.
+        // Durable Object auth and activation are already gone; a missing
+        // runtime-local registry entry is equivalent to successful cleanup.
         if (!(error instanceof PortNotExposedError)) {
           throw error;
         }
@@ -4015,10 +4045,11 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     }
   }
 
+  /**
+   * Returns preview URLs that are currently forwardable in the active runtime.
+   * Durable authorization without current-runtime activation is omitted.
+   */
   async getExposedPorts(hostname: string) {
-    const sessionId = await this.ensureDefaultSession();
-    const response = await this.client.ports.getExposedPorts(sessionId);
-
     // We need the sandbox name to construct preview URLs
     if (!this.sandboxName) {
       throw new Error(
@@ -4026,35 +4057,17 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       );
     }
 
-    // Read all tokens from storage (protected by input gates)
-    const tokens = await this.readPortTokens();
-
-    // A port reported by the container with no corresponding token in
-    // storage is an orphan. It cannot produce a valid preview URL (the
-    // token is what the URL binds to), so it is omitted from the result.
-    return response.ports.flatMap((port) => {
-      const entry = tokens[port.port.toString()];
-      if (!entry) {
-        this.logger.warn(
-          'Port exposed on container but no token in storage; omitting from preview URL list',
-          { port: port.port }
-        );
-        return [];
-      }
-
-      return [
-        {
-          url: this.constructPreviewUrl(
-            port.port,
-            this.sandboxName!,
-            hostname,
-            entry.token
-          ),
-          port: port.port,
-          status: port.status
-        }
-      ];
-    });
+    const activePorts = await this.getCurrentPreviewPorts();
+    return activePorts.map(({ port, entry }) => ({
+      url: this.constructPreviewUrl(
+        port,
+        this.sandboxName!,
+        hostname,
+        entry.token
+      ),
+      port,
+      status: 'active' as const
+    }));
   }
 
   /**
@@ -4099,19 +4112,18 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     this.tunnelExitHandler = built.handleTunnelExit;
   }
 
+  /**
+   * Returns whether a port is currently preview-forwardable.
+   * This checks Durable Object-owned auth and runtime activation without
+   * contacting or waking the container.
+   */
   async isPortExposed(port: number): Promise<boolean> {
-    try {
-      const sessionId = await this.ensureDefaultSession();
-      const response = await this.client.ports.getExposedPorts(sessionId);
-      return response.ports.some((exposedPort) => exposedPort.port === port);
-    } catch (error) {
-      this.logger.error(
-        'Error checking if port is exposed',
-        error instanceof Error ? error : new Error(String(error)),
-        { port }
-      );
+    if (!validatePort(port)) {
       return false;
     }
+
+    const activePorts = await this.getCurrentPreviewPorts();
+    return activePorts.some((activePort) => activePort.port === port);
   }
 
   /**
@@ -4145,34 +4157,16 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       return { status: 'invalid' };
     }
 
-    // Keep these liveness checks aligned with CurrentRuntimeIdentity.get();
-    // this path spells them out so stale preview URL responses can include a
-    // precise reason.
-    const state = await this.getState();
-    if (state.status !== 'healthy') {
+    const runtimeStatus = await this.currentRuntime.getStatus();
+    if (runtimeStatus.status === 'inactive') {
       return {
         status: 'stale',
-        reason: 'runtime-not-healthy',
-        runtimeStatus: state.status
+        reason: runtimeStatus.reason,
+        runtimeStatus: runtimeStatus.runtimeStatus
       };
     }
 
-    if (this.ctx.container?.running !== true) {
-      return {
-        status: 'stale',
-        reason: 'runtime-not-running',
-        runtimeStatus: state.status
-      };
-    }
-
-    const runtime = await this.currentRuntime.get();
-    if (!runtime) {
-      return {
-        status: 'stale',
-        reason: 'missing-runtime-id',
-        runtimeStatus: state.status
-      };
-    }
+    const runtime = runtimeStatus.runtime;
 
     const activations = await this.readActivePreviewPorts();
     const activation = activations[port.toString()];
@@ -4180,7 +4174,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       return {
         status: 'stale',
         reason: 'missing-activation',
-        runtimeStatus: state.status
+        runtimeStatus: runtimeStatus.runtimeStatus
       };
     }
 
@@ -4188,7 +4182,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       return {
         status: 'stale',
         reason: 'runtime-mismatch',
-        runtimeStatus: state.status
+        runtimeStatus: runtimeStatus.runtimeStatus
       };
     }
 
@@ -4200,11 +4194,42 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       return {
         status: 'stale',
         reason: 'token-mismatch',
-        runtimeStatus: state.status
+        runtimeStatus: runtimeStatus.runtimeStatus
       };
     }
 
     return { status: 'active', runtime };
+  }
+
+  private async getCurrentPreviewPorts(): Promise<CurrentPreviewPort[]> {
+    const runtimeStatus = await this.currentRuntime.getStatus();
+    if (runtimeStatus.status === 'inactive') {
+      return [];
+    }
+
+    const tokens = await this.readPortTokens();
+    const activations = await this.readActivePreviewPorts();
+    const activePorts: CurrentPreviewPort[] = [];
+
+    for (const [portKey, activation] of Object.entries(activations)) {
+      const port = Number.parseInt(portKey, 10);
+      const entry = tokens[portKey];
+      if (!entry || !Number.isInteger(port) || !validatePort(port)) {
+        continue;
+      }
+
+      if (!runtimeStatus.runtime.owns(activation)) {
+        continue;
+      }
+
+      if (!(await this.previewTokensMatch(entry.token, activation.token))) {
+        continue;
+      }
+
+      activePorts.push({ port, entry });
+    }
+
+    return activePorts.sort((a, b) => a.port - b.port);
   }
 
   private async previewTokensMatch(

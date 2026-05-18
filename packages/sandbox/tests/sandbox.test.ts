@@ -1048,7 +1048,7 @@ describe('Sandbox - Automatic Session Management', () => {
         return null;
       });
       vi.spyOn(sandbox, 'fetchIfRunning').mockResolvedValue(
-        new Response('Container is not running', { status: 503 })
+        new Response('service temporarily unavailable', { status: 503 })
       );
 
       const response = await sandbox.fetch(
@@ -1066,7 +1066,7 @@ describe('Sandbox - Automatic Session Management', () => {
       );
 
       expect(response.status).toBe(503);
-      expect(await response.text()).toBe('Container is not running');
+      expect(await response.text()).toBe('service temporarily unavailable');
     });
 
     it('returns stale when the runtime goes inactive while forwarding', async () => {
@@ -1780,18 +1780,233 @@ describe('Sandbox - Automatic Session Management', () => {
     });
   });
 
-  describe('unexposePort ordering', () => {
+  describe('getExposedPorts Contract B', () => {
+    beforeEach(async () => {
+      await sandbox.setSandboxName('test-sandbox');
+      vi.spyOn(sandbox.client.ports, 'getExposedPorts').mockResolvedValue({
+        success: true,
+        ports: [{ port: 8080, url: '', status: 'active' }],
+        count: 1,
+        timestamp: new Date().toISOString()
+      } as any);
+    });
+
+    it('lists only ports activated for the current runtime without contacting the container', async () => {
+      vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
+        if (key === 'currentRuntimeIdentity') {
+          return { id: 'runtime-1', startedAt: 123 };
+        }
+        if (key === 'portTokens') {
+          return {
+            '8080': { token: 'tok8080', name: 'api' },
+            '9090': { token: 'tok9090' }
+          };
+        }
+        if (key === 'activePreviewPorts') {
+          return {
+            '8080': {
+              runtimeIdentityID: 'runtime-1',
+              token: 'tok8080',
+              activatedAt: 456,
+              name: 'api'
+            },
+            '9090': {
+              runtimeIdentityID: 'runtime-old',
+              token: 'tok9090',
+              activatedAt: 456
+            }
+          };
+        }
+        return null;
+      });
+
+      const result = await sandbox.getExposedPorts('example.com');
+
+      expect(result).toEqual([
+        {
+          url: 'https://8080-test-sandbox-tok8080.example.com/',
+          port: 8080,
+          status: 'active'
+        }
+      ]);
+      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.ports.getExposedPorts).not.toHaveBeenCalled();
+    });
+
+    it('returns an empty list when durable auth exists without a current runtime', async () => {
+      vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
+        if (key === 'portTokens') {
+          return { '8080': { token: 'tok8080' } };
+        }
+        if (key === 'activePreviewPorts') {
+          return {
+            '8080': {
+              runtimeIdentityID: 'runtime-1',
+              token: 'tok8080',
+              activatedAt: 456
+            }
+          };
+        }
+        return null;
+      });
+
+      await expect(sandbox.getExposedPorts('example.com')).resolves.toEqual([]);
+      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.ports.getExposedPorts).not.toHaveBeenCalled();
+    });
+
+    it('omits durable auth without matching current-runtime activation', async () => {
+      vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
+        if (key === 'currentRuntimeIdentity') {
+          return { id: 'runtime-1', startedAt: 123 };
+        }
+        if (key === 'portTokens') {
+          return { '8080': { token: 'tok8080' } };
+        }
+        if (key === 'activePreviewPorts') {
+          return {};
+        }
+        return null;
+      });
+
+      await expect(sandbox.getExposedPorts('example.com')).resolves.toEqual([]);
+      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.ports.getExposedPorts).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('isPortExposed Contract B', () => {
     beforeEach(() => {
-      vi.mocked(mockCtx.storage.get).mockImplementation(async (key) =>
-        key === 'portTokens' ? { '8080': { token: 'sometoken' } } : null
-      );
+      vi.spyOn(sandbox.client.ports, 'getExposedPorts').mockResolvedValue({
+        success: true,
+        ports: [],
+        count: 0,
+        timestamp: new Date().toISOString()
+      } as any);
+    });
+
+    it('returns true only for durable auth activated in the current runtime', async () => {
+      vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
+        if (key === 'currentRuntimeIdentity') {
+          return { id: 'runtime-1', startedAt: 123 };
+        }
+        if (key === 'portTokens') {
+          return { '8080': { token: 'tok8080' } };
+        }
+        if (key === 'activePreviewPorts') {
+          return {
+            '8080': {
+              runtimeIdentityID: 'runtime-1',
+              token: 'tok8080',
+              activatedAt: 456
+            }
+          };
+        }
+        return null;
+      });
+
+      await expect(sandbox.isPortExposed(8080)).resolves.toBe(true);
+      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.ports.getExposedPorts).not.toHaveBeenCalled();
+    });
+
+    it('returns false for durable auth without activation', async () => {
+      vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
+        if (key === 'currentRuntimeIdentity') {
+          return { id: 'runtime-1', startedAt: 123 };
+        }
+        if (key === 'portTokens') {
+          return { '8080': { token: 'tok8080' } };
+        }
+        if (key === 'activePreviewPorts') {
+          return {};
+        }
+        return null;
+      });
+
+      await expect(sandbox.isPortExposed(8080)).resolves.toBe(false);
+      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.ports.getExposedPorts).not.toHaveBeenCalled();
+    });
+
+    it('returns false for activation from an old runtime', async () => {
+      vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
+        if (key === 'currentRuntimeIdentity') {
+          return { id: 'runtime-1', startedAt: 123 };
+        }
+        if (key === 'portTokens') {
+          return { '8080': { token: 'tok8080' } };
+        }
+        if (key === 'activePreviewPorts') {
+          return {
+            '8080': {
+              runtimeIdentityID: 'runtime-old',
+              token: 'tok8080',
+              activatedAt: 456
+            }
+          };
+        }
+        return null;
+      });
+
+      await expect(sandbox.isPortExposed(8080)).resolves.toBe(false);
+      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.ports.getExposedPorts).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unexposePort Contract B', () => {
+    beforeEach(() => {
       vi.spyOn(sandbox.client.ports, 'unexposePort').mockResolvedValue(
         undefined as any
       );
     });
 
-    it('revokes the token from storage before the container RPC', async () => {
+    it('revokes auth and activation without waking when no current runtime is active', async () => {
+      vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
+        if (key === 'portTokens') {
+          return { '8080': { token: 'tok8080' } };
+        }
+        if (key === 'activePreviewPorts') {
+          return {
+            '8080': {
+              runtimeIdentityID: 'runtime-1',
+              token: 'tok8080',
+              activatedAt: 456
+            }
+          };
+        }
+        return null;
+      });
+
+      await sandbox.unexposePort(8080);
+
+      expect(mockCtx.storage.put).toHaveBeenCalledWith('portTokens', {});
+      expect(mockCtx.storage.delete).toHaveBeenCalledWith('activePreviewPorts');
+      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.ports.unexposePort).not.toHaveBeenCalled();
+    });
+
+    it('cleans up the container registry only when a current runtime is active', async () => {
       const calls: string[] = [];
+      vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
+        if (key === 'currentRuntimeIdentity') {
+          return { id: 'runtime-1', startedAt: 123 };
+        }
+        if (key === 'portTokens') {
+          return { '8080': { token: 'tok8080' } };
+        }
+        if (key === 'activePreviewPorts') {
+          return {
+            '8080': {
+              runtimeIdentityID: 'runtime-1',
+              token: 'tok8080',
+              activatedAt: 456
+            }
+          };
+        }
+        return null;
+      });
       vi.mocked(mockCtx.storage.put).mockImplementation(async (key) => {
         if (key === 'portTokens') {
           calls.push('storage');
@@ -1811,9 +2026,22 @@ describe('Sandbox - Automatic Session Management', () => {
       await sandbox.unexposePort(8080);
 
       expect(calls).toEqual(['storage', 'container']);
+      expect(sandbox.client.ports.unexposePort).toHaveBeenCalledTimes(1);
     });
 
-    it('treats PortNotExposedError from the container as success', async () => {
+    it('treats PortNotExposedError from an active runtime as success', async () => {
+      vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
+        if (key === 'currentRuntimeIdentity') {
+          return { id: 'runtime-1', startedAt: 123 };
+        }
+        if (key === 'portTokens') {
+          return { '8080': { token: 'tok8080' } };
+        }
+        if (key === 'activePreviewPorts') {
+          return {};
+        }
+        return null;
+      });
       vi.mocked(sandbox.client.ports.unexposePort).mockRejectedValue(
         new PortNotExposedError({
           error: 'Port not exposed: 8080',
@@ -1829,50 +2057,25 @@ describe('Sandbox - Automatic Session Management', () => {
       );
     });
 
-    it('rethrows non-PortNotExposedError failures from the container', async () => {
+    it('rethrows non-PortNotExposedError failures from an active runtime', async () => {
+      vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
+        if (key === 'currentRuntimeIdentity') {
+          return { id: 'runtime-1', startedAt: 123 };
+        }
+        if (key === 'portTokens') {
+          return { '8080': { token: 'tok8080' } };
+        }
+        if (key === 'activePreviewPorts') {
+          return {};
+        }
+        return null;
+      });
       vi.mocked(sandbox.client.ports.unexposePort).mockRejectedValue(
         new Error('network failure')
       );
 
       await expect(sandbox.unexposePort(8080)).rejects.toThrow(
         'network failure'
-      );
-    });
-  });
-
-  describe('getExposedPorts orphan handling', () => {
-    beforeEach(async () => {
-      await sandbox.setSandboxName('test-sandbox');
-
-      vi.spyOn(sandbox.client.ports, 'getExposedPorts').mockResolvedValue({
-        success: true,
-        ports: [
-          { port: 8080, exposedAt: new Date().toISOString() },
-          { port: 9090, exposedAt: new Date().toISOString() }
-        ],
-        count: 2,
-        timestamp: new Date().toISOString()
-      } as any);
-
-      // Storage has a token for 9090 but not for 8080, so 8080 is an
-      // orphan from getExposedPorts()'s perspective.
-      vi.mocked(mockCtx.storage.get).mockImplementation(async (key) => {
-        if (key === 'portTokens') return { '9090': { token: 'token9090' } };
-        if (key === 'sandboxName') return 'test-sandbox';
-        return null;
-      });
-    });
-
-    it('omits ports with no token from the result', async () => {
-      const warnSpy = vi.spyOn((sandbox as any).logger, 'warn');
-
-      const result = await sandbox.getExposedPorts('example.com');
-
-      expect(result).toHaveLength(1);
-      expect(result[0].port).toBe(9090);
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('no token in storage'),
-        expect.objectContaining({ port: 8080 })
       );
     });
   });
