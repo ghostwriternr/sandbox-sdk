@@ -153,6 +153,11 @@ type CurrentPreviewPort = {
   entry: PortTokenEntry;
 };
 
+type PreviewStateStorage = Pick<
+  DurableObjectStorage | DurableObjectTransaction,
+  'get' | 'put' | 'delete'
+>;
+
 const PORT_TOKENS_STORAGE_KEY = 'portTokens';
 const ACTIVE_PREVIEW_PORTS_STORAGE_KEY = 'activePreviewPorts';
 
@@ -1944,9 +1949,11 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
    * ({ token, name? }). The legacy format predates port-name persistence and
    * can appear on any DO whose storage was written before that change.
    */
-  private async readPortTokens(): Promise<Record<string, PortTokenEntry>> {
+  private async readPortTokens(
+    storage: PreviewStateStorage = this.ctx.storage
+  ): Promise<Record<string, PortTokenEntry>> {
     const raw =
-      (await this.ctx.storage.get<Record<string, string | PortTokenEntry>>(
+      (await storage.get<Record<string, string | PortTokenEntry>>(
         PORT_TOKENS_STORAGE_KEY
       )) ?? {};
     const normalized: Record<string, PortTokenEntry> = {};
@@ -1956,23 +1963,39 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     return normalized;
   }
 
-  private async readActivePreviewPorts(): Promise<PreviewPortActivations> {
+  private async readActivePreviewPorts(
+    storage: PreviewStateStorage = this.ctx.storage
+  ): Promise<PreviewPortActivations> {
     return (
-      (await this.ctx.storage.get<PreviewPortActivations>(
+      (await storage.get<PreviewPortActivations>(
         ACTIVE_PREVIEW_PORTS_STORAGE_KEY
       )) ?? {}
     );
   }
 
   private async writeActivePreviewPorts(
-    activations: PreviewPortActivations
+    activations: PreviewPortActivations,
+    storage: PreviewStateStorage = this.ctx.storage
   ): Promise<void> {
     if (Object.keys(activations).length === 0) {
-      await this.ctx.storage.delete(ACTIVE_PREVIEW_PORTS_STORAGE_KEY);
+      await storage.delete(ACTIVE_PREVIEW_PORTS_STORAGE_KEY);
       return;
     }
 
-    await this.ctx.storage.put(ACTIVE_PREVIEW_PORTS_STORAGE_KEY, activations);
+    await storage.put(ACTIVE_PREVIEW_PORTS_STORAGE_KEY, activations);
+  }
+
+  private async readPreviewState(
+    storage: PreviewStateStorage = this.ctx.storage
+  ): Promise<{
+    tokens: Record<string, PortTokenEntry>;
+    activations: PreviewPortActivations;
+  }> {
+    const [tokens, activations] = await Promise.all([
+      this.readPortTokens(storage),
+      this.readActivePreviewPorts(storage)
+    ]);
+    return { tokens, activations };
   }
 
   private async clearActivePreviewPorts(): Promise<void> {
@@ -2483,6 +2506,12 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       return this.invalidPreviewTokenResponse();
     }
 
+    const proxyRequest = this.buildPreviewProxyRequest(
+      request,
+      port,
+      sandboxId
+    );
+
     const validation = await this.validatePreviewURLForRuntime(port, token);
     if (validation.status === 'invalid') {
       return this.invalidPreviewTokenResponse();
@@ -2496,15 +2525,6 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
         reason: validation.reason,
         method: request.method
       });
-      return this.stalePreviewURLResponse();
-    }
-
-    const proxyRequest = this.buildPreviewProxyRequest(
-      request,
-      port,
-      sandboxId
-    );
-    if (!(await this.currentRuntime.isActive(validation.runtime))) {
       return this.stalePreviewURLResponse();
     }
 
@@ -2582,7 +2602,8 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
   }
 
   private determinePort(url: URL): number {
-    // Extract port from proxy requests (e.g., /proxy/8080/*)
+    // Direct DO fetch compatibility path used by switchPort()/wsConnect().
+    // Public preview URL traffic enters through proxyPreviewRequest() instead.
     const proxyMatch = url.pathname.match(/^\/proxy\/(\d+)/);
     if (proxyMatch) {
       return parseInt(proxyMatch[1], 10);
@@ -3882,27 +3903,10 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
         );
       }
 
-      const tokens = await this.readPortTokens();
-      const existingEntry = tokens[port.toString()];
-      let token: string;
       if (options.token !== undefined) {
         this.validateCustomToken(options.token);
-        token = options.token;
-      } else if (existingEntry) {
-        token = existingEntry.token;
-      } else {
-        token = this.generatePortToken();
       }
 
-      // Allow re-exposing same port with same token, but reject if another port uses this token
-      const existingPort = Object.entries(tokens).find(
-        ([p, entry]) => entry.token === token && p !== port.toString()
-      );
-      if (existingPort) {
-        throw new SandboxSecurityError(
-          `Token '${token}' is already in use by port ${existingPort[0]}. Please use a different token.`
-        );
-      }
       await this.ensureDefaultSession();
 
       // onStart() may record runtime identity while ensureDefaultSession()
@@ -3912,13 +3916,33 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       runtime = runtime ?? (await this.currentRuntime.markStarted());
       await this.currentRuntime.assertActive(runtime);
 
-      tokens[port.toString()] = { token, name: options.name };
-      const activations = await this.readActivePreviewPorts();
-      activations[port.toString()] = runtime.scope({ token });
-      await Promise.all([
-        this.ctx.storage.put(PORT_TOKENS_STORAGE_KEY, tokens),
-        this.writeActivePreviewPorts(activations)
-      ]);
+      const token = await this.ctx.storage.transaction(async (txn) => {
+        const tokens = await this.readPortTokens(txn);
+        const existingEntry = tokens[port.toString()];
+        const nextToken =
+          options.token ?? existingEntry?.token ?? this.generatePortToken();
+
+        // Allow re-exposing same port with same token, but reject if another port uses this token
+        const existingPort = Object.entries(tokens).find(
+          ([p, entry]) => entry.token === nextToken && p !== port.toString()
+        );
+        if (existingPort) {
+          throw new SandboxSecurityError(
+            `Token '${nextToken}' is already in use by port ${existingPort[0]}. Please use a different token.`
+          );
+        }
+
+        const activations = await this.readActivePreviewPorts(txn);
+
+        tokens[port.toString()] = { token: nextToken, name: options.name };
+        activations[port.toString()] = runtime.scope({ token: nextToken });
+        await Promise.all([
+          txn.put(PORT_TOKENS_STORAGE_KEY, tokens),
+          this.writeActivePreviewPorts(activations, txn)
+        ]);
+
+        return nextToken;
+      });
 
       // If a concurrent lifecycle hook records a newer runtime identity after
       // the storage writes, fail instead of returning a URL that is stale on
@@ -3977,17 +4001,19 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       // Storage is the source of truth for preview-URL auth and activation.
       // Clearing DO-owned state is sufficient to revoke forwarding and does
       // not need to contact the container runtime.
-      const tokens = await this.readPortTokens();
-      if (tokens[port.toString()]) {
-        delete tokens[port.toString()];
-        await this.ctx.storage.put(PORT_TOKENS_STORAGE_KEY, tokens);
-      }
+      await this.ctx.storage.transaction(async (txn) => {
+        const tokens = await this.readPortTokens(txn);
+        if (tokens[port.toString()]) {
+          delete tokens[port.toString()];
+          await txn.put(PORT_TOKENS_STORAGE_KEY, tokens);
+        }
 
-      const activations = await this.readActivePreviewPorts();
-      if (activations[port.toString()]) {
-        delete activations[port.toString()];
-        await this.writeActivePreviewPorts(activations);
-      }
+        const activations = await this.readActivePreviewPorts(txn);
+        if (activations[port.toString()]) {
+          delete activations[port.toString()];
+          await this.writeActivePreviewPorts(activations, txn);
+        }
+      });
 
       outcome = 'success';
     } catch (error) {
@@ -4098,42 +4124,65 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       return false;
     }
 
-    return await this.previewTokensMatch(entry.token, token);
+    return this.previewTokensMatch(entry.token, token);
   }
 
   private async validatePreviewURLForRuntime(
     port: number,
     token: string
   ): Promise<PreviewURLRuntimeValidation> {
-    const tokens = await this.readPortTokens();
+    const containerState = await this.getState();
+    const containerRunning = this.ctx.container?.running === true;
+    const { tokens, activations, runtime } = await this.ctx.storage.transaction(
+      async (txn) => {
+        const [previewState, runtime] = await Promise.all([
+          this.readPreviewState(txn),
+          this.currentRuntime.getStored(txn)
+        ]);
+        return { ...previewState, runtime };
+      }
+    );
+
     const entry = tokens[port.toString()];
     if (!entry) {
       return { status: 'invalid' };
     }
 
-    const tokenMatches = await this.previewTokensMatch(entry.token, token);
+    const tokenMatches = this.previewTokensMatch(entry.token, token);
     if (!tokenMatches) {
       return { status: 'invalid' };
     }
 
-    const currentRuntimeStatus = await this.currentRuntime.getStatus();
-    if (currentRuntimeStatus.status === 'inactive') {
+    if (containerState.status !== 'healthy') {
       return {
         status: 'stale',
-        reason: currentRuntimeStatus.reason,
-        containerStatus: currentRuntimeStatus.containerStatus
+        reason: 'runtime-not-healthy',
+        containerStatus: containerState.status
       };
     }
 
-    const runtime = currentRuntimeStatus.runtime;
+    if (!containerRunning) {
+      return {
+        status: 'stale',
+        reason: 'runtime-not-running',
+        containerStatus: containerState.status
+      };
+    }
 
-    const activations = await this.readActivePreviewPorts();
+    if (!runtime) {
+      return {
+        status: 'stale',
+        reason: 'missing-runtime-id',
+        containerStatus: containerState.status
+      };
+    }
+
     const activation = activations[port.toString()];
     if (!activation) {
       return {
         status: 'stale',
         reason: 'missing-activation',
-        containerStatus: currentRuntimeStatus.containerStatus
+        containerStatus: containerState.status
       };
     }
 
@@ -4141,11 +4190,11 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       return {
         status: 'stale',
         reason: 'runtime-mismatch',
-        containerStatus: currentRuntimeStatus.containerStatus
+        containerStatus: containerState.status
       };
     }
 
-    const activationTokenMatches = await this.previewTokensMatch(
+    const activationTokenMatches = this.previewTokensMatch(
       activation.token,
       token
     );
@@ -4157,7 +4206,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       return {
         status: 'stale',
         reason: 'token-mismatch',
-        containerStatus: currentRuntimeStatus.containerStatus
+        containerStatus: containerState.status
       };
     }
 
@@ -4165,13 +4214,22 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
   }
 
   private async getCurrentPreviewPorts(): Promise<CurrentPreviewPort[]> {
-    const currentRuntimeStatus = await this.currentRuntime.getStatus();
-    if (currentRuntimeStatus.status === 'inactive') {
+    const containerState = await this.getState();
+    const containerRunning = this.ctx.container?.running === true;
+    const { tokens, activations, runtime } = await this.ctx.storage.transaction(
+      async (txn) => {
+        const [previewState, runtime] = await Promise.all([
+          this.readPreviewState(txn),
+          this.currentRuntime.getStored(txn)
+        ]);
+        return { ...previewState, runtime };
+      }
+    );
+
+    if (containerState.status !== 'healthy' || !containerRunning || !runtime) {
       return [];
     }
 
-    const tokens = await this.readPortTokens();
-    const activations = await this.readActivePreviewPorts();
     const activePorts: CurrentPreviewPort[] = [];
 
     for (const [portKey, activation] of Object.entries(activations)) {
@@ -4181,11 +4239,11 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
         continue;
       }
 
-      if (!currentRuntimeStatus.runtime.owns(activation)) {
+      if (!runtime.owns(activation)) {
         continue;
       }
 
-      if (!(await this.previewTokensMatch(entry.token, activation.token))) {
+      if (!this.previewTokensMatch(entry.token, activation.token)) {
         continue;
       }
 
@@ -4195,10 +4253,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     return activePorts.sort((a, b) => a.port - b.port);
   }
 
-  private async previewTokensMatch(
-    expected: string,
-    actual: string
-  ): Promise<boolean> {
+  private previewTokensMatch(expected: string, actual: string): boolean {
     const encoder = new TextEncoder();
     const a = encoder.encode(expected);
     const b = encoder.encode(actual);

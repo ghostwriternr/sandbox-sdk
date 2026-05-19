@@ -74,6 +74,7 @@ interface MockStorage {
   put: ReturnType<typeof vi.fn>;
   delete: ReturnType<typeof vi.fn>;
   list: ReturnType<typeof vi.fn>;
+  transaction: ReturnType<typeof vi.fn>;
 }
 
 interface MockCtx {
@@ -136,18 +137,21 @@ describe('Sandbox - Automatic Session Management', () => {
 
     const storageState = new Map<string, unknown>();
 
+    const storage = {
+      get: vi.fn(async (key: string) => storageState.get(key) ?? null),
+      put: vi.fn(async (key: string, value: unknown) => {
+        storageState.set(key, value);
+      }),
+      delete: vi.fn(async (key: string) => {
+        storageState.delete(key);
+      }),
+      list: vi.fn().mockResolvedValue(new Map()),
+      transaction: vi.fn(async (callback) => callback(storage))
+    };
+
     // Mock DurableObjectState
     mockCtx = {
-      storage: {
-        get: vi.fn(async (key: string) => storageState.get(key) ?? null),
-        put: vi.fn(async (key: string, value: unknown) => {
-          storageState.set(key, value);
-        }),
-        delete: vi.fn(async (key: string) => {
-          storageState.delete(key);
-        }),
-        list: vi.fn().mockResolvedValue(new Map())
-      } as any,
+      storage: storage as any,
       blockConcurrencyWhile: vi
         .fn()
         .mockImplementation(
@@ -1668,6 +1672,55 @@ describe('Sandbox - Automatic Session Management', () => {
           '8080': expect.objectContaining({ token: 'stabletok' })
         })
       );
+    });
+
+    it('exposePort() does not restore a port revoked while the runtime starts', async () => {
+      const storage = new Map<string, unknown>([
+        ['portTokens', { '8080': { token: 'oldtoken' } }],
+        ['currentRuntimeIdentity', { id: 'runtime-1' }],
+        ['activePreviewPorts', {}]
+      ]);
+      mockCtx.storage.get.mockImplementation(
+        async (key: string) => storage.get(key) ?? null
+      );
+      mockCtx.storage.put.mockImplementation(async (key: string, value) => {
+        storage.set(key, value);
+      });
+      mockCtx.storage.delete.mockImplementation(async (key: string) => {
+        storage.delete(key);
+      });
+
+      let releaseStartup!: () => void;
+      const startupGate = new Promise<void>((resolve) => {
+        releaseStartup = resolve;
+      });
+      const ensureDefaultSessionSpy = vi
+        .spyOn(
+          sandbox as unknown as { ensureDefaultSession: () => Promise<string> },
+          'ensureDefaultSession'
+        )
+        .mockImplementation(async () => {
+          await startupGate;
+          return 'sandbox-default';
+        });
+
+      const exposePromise = sandbox.exposePort(9090, {
+        hostname: 'example.com',
+        token: 'newtoken'
+      });
+      await vi.waitFor(() =>
+        expect(ensureDefaultSessionSpy).toHaveBeenCalled()
+      );
+
+      await sandbox.unexposePort(8080);
+      expect(storage.get('portTokens')).toEqual({});
+
+      releaseStartup();
+      await exposePromise;
+
+      expect(storage.get('portTokens')).toEqual({
+        '9090': { token: 'newtoken', name: undefined }
+      });
     });
   });
 

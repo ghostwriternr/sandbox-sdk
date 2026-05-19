@@ -21,6 +21,11 @@ export type CurrentRuntimeStatus =
       containerStatus?: string;
     };
 
+type RuntimeIdentityStorage = Pick<
+  DurableObjectStorage | DurableObjectTransaction,
+  'get'
+>;
+
 const CURRENT_RUNTIME_IDENTITY_STORAGE_KEY = 'currentRuntimeIdentity';
 
 export class RuntimeIdentityInactiveError extends Error {
@@ -84,11 +89,8 @@ export class CurrentRuntimeIdentity {
       };
     }
 
-    const record =
-      (await this.storage.get<RuntimeIdentityRecord>(
-        CURRENT_RUNTIME_IDENTITY_STORAGE_KEY
-      )) ?? null;
-    if (!record) {
+    const runtime = await this.getStored();
+    if (!runtime) {
       return {
         status: 'inactive',
         reason: 'missing-runtime-id',
@@ -98,9 +100,19 @@ export class CurrentRuntimeIdentity {
 
     return {
       status: 'active',
-      runtime: new RuntimeIdentity(record),
+      runtime,
       containerStatus: state.status
     };
+  }
+
+  async getStored(
+    storage: RuntimeIdentityStorage = this.storage
+  ): Promise<RuntimeIdentity | null> {
+    const record =
+      (await storage.get<RuntimeIdentityRecord>(
+        CURRENT_RUNTIME_IDENTITY_STORAGE_KEY
+      )) ?? null;
+    return record ? new RuntimeIdentity(record) : null;
   }
 
   async markStarted(): Promise<RuntimeIdentity> {

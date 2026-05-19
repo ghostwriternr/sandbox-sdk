@@ -107,6 +107,34 @@ async function exposeLifecyclePort(
   return preview.url;
 }
 
+type ExposedPortsResponse = Array<{
+  port: number;
+  url: string;
+  status: string;
+}>;
+
+async function getExposedPorts(
+  workerUrl: string,
+  headers: Record<string, string>
+): Promise<ExposedPortsResponse> {
+  const response = await fetch(`${workerUrl}/api/exposed-ports`, { headers });
+  expect(response.status).toBe(200);
+  return (await response.json()) as ExposedPortsResponse;
+}
+
+async function isLifecyclePortExposed(
+  workerUrl: string,
+  headers: Record<string, string>
+): Promise<boolean> {
+  const response = await fetch(
+    `${workerUrl}/api/exposed-ports/${PREVIEW_LIFECYCLE_PORT}`,
+    { headers }
+  );
+  expect(response.status).toBe(200);
+  const body = (await response.json()) as { exposed: boolean };
+  return body.exposed;
+}
+
 function previewURL(previewUrl: string, path: string): string {
   return new URL(path, previewUrl).toString();
 }
@@ -276,6 +304,49 @@ describe('Preview URL lifecycle', () => {
         expect(await getContainerStatus(workerUrl, portHeaders)).not.toBe(
           'healthy'
         );
+      } finally {
+        await stopContainer(workerUrl, portHeaders).catch(() => undefined);
+      }
+    },
+    180000
+  );
+
+  test.skipIf(skipPortExposureTests)(
+    'preview port APIs report only current-runtime activated ports without waking',
+    async () => {
+      try {
+        await startPreviewServer(workerUrl, headers);
+        const previewUrl = await exposeLifecyclePort(workerUrl, portHeaders);
+
+        await expect(getExposedPorts(workerUrl, portHeaders)).resolves.toEqual([
+          {
+            port: PREVIEW_LIFECYCLE_PORT,
+            url: previewUrl,
+            status: 'active'
+          }
+        ]);
+        await expect(
+          isLifecyclePortExposed(workerUrl, portHeaders)
+        ).resolves.toBe(true);
+
+        await stopContainer(workerUrl, portHeaders);
+        await expect(getExposedPorts(workerUrl, portHeaders)).resolves.toEqual(
+          []
+        );
+        await expect(
+          isLifecyclePortExposed(workerUrl, portHeaders)
+        ).resolves.toBe(false);
+        expect(await getContainerStatus(workerUrl, portHeaders)).not.toBe(
+          'healthy'
+        );
+
+        await startPreviewServer(workerUrl, headers);
+        await expect(getExposedPorts(workerUrl, portHeaders)).resolves.toEqual(
+          []
+        );
+        await expect(
+          isLifecyclePortExposed(workerUrl, portHeaders)
+        ).resolves.toBe(false);
       } finally {
         await stopContainer(workerUrl, portHeaders).catch(() => undefined);
       }
