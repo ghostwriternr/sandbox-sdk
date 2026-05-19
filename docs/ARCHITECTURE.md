@@ -75,7 +75,7 @@ SandboxClient
     ├── CommandClient     (exec, streaming)
     ├── FileClient        (read, write, list, delete)
     ├── ProcessClient     (background processes)
-    ├── PortClient        (expose services)
+    ├── PortClient        (port readiness streams)
     ├── GitClient         (clone repos)
     ├── UtilityClient     (sessions, health)
     └── InterpreterClient (code execution)

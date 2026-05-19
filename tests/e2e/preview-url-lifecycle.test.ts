@@ -2,6 +2,10 @@ import type { PortExposeResult, Process } from '@repo/shared';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import WebSocket from 'ws';
 import {
+  getContainerStatus,
+  stopContainerAndWait as stopContainer
+} from './helpers/container-lifecycle';
+import {
   cleanupTestSandbox,
   createTestSandbox,
   createUniqueSession,
@@ -12,18 +16,6 @@ const skipPortExposureTests =
   process.env.TEST_WORKER_URL?.endsWith('.workers.dev') ?? false;
 const PREVIEW_LIFECYCLE_PORT = 9852;
 const PREVIEW_TOKEN = 'lifecycleok';
-
-type ContainerStateResponse = { status?: string };
-
-async function getContainerStatus(
-  workerUrl: string,
-  headers: Record<string, string>
-): Promise<string | undefined> {
-  const response = await fetch(`${workerUrl}/api/state`, { headers });
-  expect(response.status).toBe(200);
-  const state = (await response.json()) as ContainerStateResponse;
-  return state.status;
-}
 
 async function writePreviewServer(
   workerUrl: string,
@@ -113,27 +105,6 @@ async function exposeLifecyclePort(
   expect(exposeResponse.status).toBe(200);
   const preview = (await exposeResponse.json()) as PortExposeResult;
   return preview.url;
-}
-
-async function stopContainer(
-  workerUrl: string,
-  headers: Record<string, string>
-): Promise<void> {
-  const response = await fetch(`${workerUrl}/api/container/stop`, {
-    method: 'POST',
-    headers
-  });
-  expect(response.status).toBe(200);
-
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if ((await getContainerStatus(workerUrl, headers)) !== 'healthy') {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-
-  expect(await getContainerStatus(workerUrl, headers)).not.toBe('healthy');
 }
 
 function previewURL(previewUrl: string, path: string): string {

@@ -68,7 +68,6 @@ import {
   CustomDomainRequiredError,
   ErrorCode,
   InvalidBackupConfigError,
-  PortNotExposedError,
   ProcessExitedBeforeReadyError,
   ProcessReadyTimeoutError,
   SandboxError,
@@ -3925,15 +3924,12 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
           `Token '${token}' is already in use by port ${existingPort[0]}. Please use a different token.`
         );
       }
-      const sessionId = await this.ensureDefaultSession();
+      await this.ensureDefaultSession();
+
+      // onStart() may record runtime identity while ensureDefaultSession()
+      // starts the container. Re-read before falling back to markStarted() so
+      // normal start hooks remain the identity source.
       let runtime = await this.currentRuntime.get();
-
-      await this.client.ports.exposePort(port, sessionId, options.name);
-
-      // onStart() may record runtime identity while ensureDefaultSession() or
-      // exposePort() starts the container. Re-read once before falling back to
-      // markStarted() so normal start hooks remain the identity source.
-      runtime = runtime ?? (await this.currentRuntime.get());
       runtime = runtime ?? (await this.currentRuntime.markStarted());
       await this.currentRuntime.assertActive(runtime);
 
@@ -3986,13 +3982,9 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
         );
       }
 
-      // Storage is the source of truth for preview-URL auth, so clear
-      // the token before the container RPC. A preview request that
-      // arrives during the container call sees no token, fails auth,
-      // and is rejected before containerFetch() can route it to the
-      // process running inside the sandbox. (containerFetch() does not
-      // gate on the container's exposed-port registry; it connects to
-      // the port number directly.)
+      // Storage is the source of truth for preview-URL auth and activation.
+      // Clearing DO-owned state is sufficient to revoke forwarding and does
+      // not need to contact the container runtime.
       const tokens = await this.readPortTokens();
       if (tokens[port.toString()]) {
         delete tokens[port.toString()];
@@ -4003,23 +3995,6 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       if (activations[port.toString()]) {
         delete activations[port.toString()];
         await this.writeActivePreviewPorts(activations);
-      }
-
-      const runtime = await this.currentRuntime.get();
-      if (!runtime) {
-        outcome = 'success';
-        return;
-      }
-
-      const sessionId = await this.ensureDefaultSession();
-      try {
-        await this.client.ports.unexposePort(port, sessionId);
-      } catch (error) {
-        // Durable Object auth and activation are already gone; a missing
-        // runtime-local registry entry is equivalent to successful cleanup.
-        if (!(error instanceof PortNotExposedError)) {
-          throw error;
-        }
       }
 
       outcome = 'success';

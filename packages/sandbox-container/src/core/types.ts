@@ -187,18 +187,6 @@ export interface ListSessionsResponse {
   timestamp: string;
 }
 
-// Port service specific error response interfaces
-export interface PortNotFoundResponse {
-  error: string;
-  port: number;
-}
-
-export interface ProxyErrorResponse {
-  error: string;
-  message: string;
-  port: number;
-}
-
 export interface Middleware {
   handle(
     request: Request,
@@ -317,14 +305,6 @@ export interface WriteOptions {
 export interface MkdirOptions {
   recursive?: boolean;
   mode?: string;
-}
-
-// Port management types
-export interface PortInfo {
-  port: number;
-  name?: string;
-  exposedAt: Date;
-  status: 'active' | 'inactive';
 }
 
 // Git operation types
