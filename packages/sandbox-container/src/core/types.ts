@@ -90,44 +90,6 @@ export interface CommandsResponse {
   timestamp: string;
 }
 
-// Port handler response interfaces
-export interface ExposePortResponse {
-  success: true;
-  port: number;
-  name?: string;
-  exposedAt: string;
-  timestamp: string;
-}
-
-export interface UnexposePortResponse {
-  success: true;
-  message: string;
-  port: number;
-  timestamp: string;
-}
-
-export interface ListExposedPortsResponse {
-  success: true;
-  count: number;
-  ports: Array<{
-    port: number;
-    name?: string;
-    exposedAt: string;
-  }>;
-  timestamp: string;
-}
-
-// Proxied service response interfaces - for responses from external services via proxy
-export interface ProxiedSuccessResponse {
-  success: boolean;
-  [key: string]: unknown;
-}
-
-export interface ProxiedErrorResponse {
-  error: string;
-  [key: string]: unknown;
-}
-
 // Process handler response interfaces
 export interface StartProcessResponse {
   success: true;

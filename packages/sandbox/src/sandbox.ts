@@ -78,6 +78,7 @@ import { CodeInterpreter } from './interpreter';
 import { LocalMountSyncManager } from './local-mount-sync';
 import {
   PREVIEW_PROXY_HEADER,
+  PREVIEW_PROXY_HEADERS,
   PREVIEW_PROXY_PORT_HEADER,
   PREVIEW_PROXY_SANDBOX_ID_HEADER,
   PREVIEW_PROXY_TOKEN_HEADER
@@ -2441,10 +2442,9 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     const url = new URL(request.url);
     const proxyUrl = `http://localhost:${port}${url.pathname}${url.search}`;
     const headers = new Headers(request.headers);
-    headers.delete(PREVIEW_PROXY_HEADER);
-    headers.delete(PREVIEW_PROXY_PORT_HEADER);
-    headers.delete(PREVIEW_PROXY_TOKEN_HEADER);
-    headers.delete(PREVIEW_PROXY_SANDBOX_ID_HEADER);
+    for (const header of PREVIEW_PROXY_HEADERS) {
+      headers.delete(header);
+    }
     headers.set('X-Original-URL', request.url);
     headers.set('X-Forwarded-Host', url.hostname);
     headers.set('X-Forwarded-Proto', url.protocol.replace(':', ''));
@@ -3745,32 +3745,11 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       );
     }
 
-    let url: string;
-
-    // Try exposing port 6080; if already exposed, construct the URL from stored token
-    try {
-      const result = await this.exposePort(6080, {
-        hostname,
-        token: options?.token
-      });
-      url = result.url;
-    } catch {
-      // Port may already be exposed — look up the existing token from DO storage
-      const tokens = await this.readPortTokens();
-      const existingEntry = tokens['6080'];
-      if (existingEntry && this.sandboxName) {
-        url = this.constructPreviewUrl(
-          6080,
-          this.sandboxName,
-          hostname,
-          existingEntry.token
-        );
-      } else {
-        throw new Error(
-          'Failed to get desktop stream URL: port 6080 could not be exposed and no existing token found.'
-        );
-      }
-    }
+    const result = await this.exposePort(6080, {
+      hostname,
+      token: options?.token
+    });
+    const url = result.url;
 
     // Wait for the platform to detect port 6080 using the Containers runtime's
     // built-in port readiness mechanism (getTcpPort polling). This ensures the
@@ -3941,6 +3920,12 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
         this.writeActivePreviewPorts(activations)
       ]);
 
+      // If a concurrent lifecycle hook records a newer runtime identity after
+      // the storage writes, fail instead of returning a URL that is stale on
+      // arrival. The stale activation remains harmless because preview
+      // forwarding requires ownership by the current runtime identity.
+      await this.currentRuntime.assertActive(runtime);
+
       const url = this.constructPreviewUrl(
         port,
         this.sandboxName,
@@ -3971,6 +3956,13 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     }
   }
 
+  /**
+   * Revoke preview URL authorization and current-runtime activation for a port.
+   *
+   * Revocation is idempotent: calling this for a port with no preview state is
+   * still successful. The operation clears Durable Object-owned preview state
+   * only and does not contact, probe, wake, or clean up the container runtime.
+   */
   async unexposePort(port: number) {
     const unexposeStartTime = Date.now();
     let outcome: 'success' | 'error' = 'error';

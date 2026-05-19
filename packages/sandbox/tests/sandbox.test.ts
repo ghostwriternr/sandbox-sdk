@@ -1606,6 +1606,43 @@ describe('Sandbox - Automatic Session Management', () => {
       );
     });
 
+    it('exposePort() rejects if runtime identity changes after preview state writes', async () => {
+      let runtimeIdentityReads = 0;
+      vi.mocked(mockCtx.storage!.get).mockImplementation(async (key) => {
+        if (key === 'portTokens') {
+          return {};
+        }
+        if (key === 'currentRuntimeIdentity') {
+          runtimeIdentityReads++;
+          return {
+            id: runtimeIdentityReads <= 2 ? 'runtime-1' : 'runtime-2'
+          };
+        }
+        if (key === 'activePreviewPorts') {
+          return {};
+        }
+        return null;
+      });
+      vi.mocked(mockCtx.storage!.put).mockClear();
+
+      await expect(
+        sandbox.exposePort(8080, {
+          hostname: 'example.com',
+          token: 'friendlytok'
+        })
+      ).rejects.toBeInstanceOf(RuntimeIdentityInactiveError);
+
+      expect(mockCtx.storage.put).toHaveBeenCalledWith('portTokens', {
+        '8080': { token: 'friendlytok', name: undefined }
+      });
+      expect(mockCtx.storage.put).toHaveBeenCalledWith('activePreviewPorts', {
+        '8080': {
+          runtimeIdentityID: 'runtime-1',
+          token: 'friendlytok'
+        }
+      });
+    });
+
     it('exposePort() reuses the existing token when re-exposing the same port without a token', async () => {
       vi.mocked(mockCtx.storage!.get).mockImplementation(async (key) => {
         if (key === 'portTokens') {
@@ -1641,8 +1678,6 @@ describe('Sandbox - Automatic Session Management', () => {
         deletedKeys.push(String(key));
         return true;
       });
-      // restoreExposedPorts reads portTokens; make it a no-op so the
-      // tunnels-clear branch is reachable.
       vi.mocked(mockCtx.storage!.get).mockResolvedValue(undefined as any);
 
       await (sandbox as any).onStart();
@@ -1663,6 +1698,27 @@ describe('Sandbox - Automatic Session Management', () => {
       await sandbox.destroy();
 
       expect(deletedKeys).toContain('tunnels');
+    });
+  });
+
+  describe('desktop preview URL lifecycle', () => {
+    it('does not synthesize a desktop preview URL from durable auth when exposePort fails', async () => {
+      await sandbox.setSandboxName('test-sandbox', false);
+      vi.spyOn(sandbox.client.desktop, 'status').mockResolvedValue({
+        success: true,
+        status: 'active',
+        processes: {},
+        resolution: [1024, 768],
+        dpi: 96
+      });
+      vi.mocked(mockCtx.storage.get).mockImplementation(async (key) =>
+        key === 'portTokens' ? { '6080': { token: 'oldtoken' } } : null
+      );
+      vi.spyOn(sandbox, 'exposePort').mockRejectedValue(new Error('boom'));
+
+      await expect(sandbox.getDesktopStreamUrl('example.com')).rejects.toThrow(
+        'boom'
+      );
     });
   });
 

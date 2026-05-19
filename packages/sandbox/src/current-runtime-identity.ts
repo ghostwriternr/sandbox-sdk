@@ -50,6 +50,11 @@ export class RuntimeIdentity {
 }
 
 export class CurrentRuntimeIdentity {
+  /**
+   * Runtime identity is stored in Durable Object storage so a reconstructed DO
+   * can still recognize the live container runtime it owns. In-memory state is
+   * only a cache and cannot define runtime-scoped correctness.
+   */
   constructor(
     private readonly storage: DurableObjectState['storage'],
     private readonly getContainerState: () => Promise<{ status: string }>,

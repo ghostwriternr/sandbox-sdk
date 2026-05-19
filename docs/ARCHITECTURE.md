@@ -128,7 +128,7 @@ Sessions isolate execution contexts (working directory, environment variables). 
 
 ### Port Exposure
 
-Services in the container can be exposed via preview URLs with token-based authentication. The Sandbox DO manages token generation and validation; requests are proxied through `proxyToSandbox()`.
+Services in the container can be exposed via preview URLs with token-based authentication. The Sandbox DO owns preview URL authorization and current-runtime activation; requests are routed through `proxyToSandbox()` and only forward after `exposePort()` has activated the port for the current runtime. Durable authorization can survive a container restart, but callers must expose the port again before an old preview URL forwards to the new runtime.
 
 ### Error Flow
 
