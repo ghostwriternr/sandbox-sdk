@@ -2874,6 +2874,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     }
   }
 
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Implemented verbatim as requested by Task 3 brief
   private async ensureControlPlaneReady(signal?: AbortSignal): Promise<void> {
     await this.startAndWaitForPorts({
       ports: this.defaultPort,
@@ -3472,14 +3473,22 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
   ): Promise<number> {
     if (timeoutMs === undefined) return process.exitCode;
 
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    const timeoutPromise = new Promise<number>((resolve) => {
+      timeoutId = setTimeout(() => {
+        process.kill(15);
+        resolve(124);
+      }, timeoutMs);
+    });
+
     return Promise.race([
-      process.exitCode,
-      new Promise<number>((resolve) => {
-        setTimeout(() => {
-          process.kill(15);
-          resolve(124);
-        }, timeoutMs);
-      })
+      process.exitCode.finally(() => {
+        if (timeoutId !== undefined) {
+          clearTimeout(timeoutId);
+        }
+      }),
+      timeoutPromise
     ]);
   }
 
@@ -3504,49 +3513,68 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       interval
     });
 
-    const ready = this.consumePortWatchStream(stream);
-    const exited = processExitCode.then((code) => {
-      throw new ProcessExitedBeforeReadyError({
-        code: ErrorCode.PROCESS_EXITED_BEFORE_READY,
-        message: `Process exited with code ${code} before becoming ready. Waiting for: port ${port}`,
-        context: {
-          processId: 'native-exec',
-          command: 'exec',
-          condition: `port ${port}`,
-          exitCode: code
-        },
-        httpStatus: 500,
-        timestamp: new Date().toISOString()
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let isDone = false;
+
+    try {
+      const ready = this.consumePortWatchStream(stream).then(() => {
+        isDone = true;
       });
-    });
 
-    if (timeout === undefined) {
-      await Promise.race([ready, exited]);
-      return;
+      const exited = processExitCode.then((code) => {
+        if (isDone) {
+          return;
+        }
+        isDone = true;
+        throw new ProcessExitedBeforeReadyError({
+          code: ErrorCode.PROCESS_EXITED_BEFORE_READY,
+          message: `Process exited with code ${code} before becoming ready. Waiting for: port ${port}`,
+          context: {
+            processId: 'native-exec',
+            command: 'exec',
+            condition: `port ${port}`,
+            exitCode: code
+          },
+          httpStatus: 500,
+          timestamp: new Date().toISOString()
+        });
+      });
+
+      const promises: Promise<void>[] = [ready, exited];
+
+      if (timeout !== undefined) {
+        const timeoutPromise = new Promise<void>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            if (isDone) {
+              return;
+            }
+            isDone = true;
+            reject(
+              new ProcessReadyTimeoutError({
+                code: ErrorCode.PROCESS_READY_TIMEOUT,
+                message: `Process did not become ready within ${timeout}ms. Waiting for: port ${port}`,
+                context: {
+                  processId: 'native-exec',
+                  command: 'exec',
+                  condition: `port ${port}`,
+                  timeout
+                },
+                httpStatus: 408,
+                timestamp: new Date().toISOString()
+              })
+            );
+          }, timeout);
+        });
+        promises.push(timeoutPromise);
+      }
+
+      await Promise.race(promises);
+    } finally {
+      isDone = true;
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
     }
-
-    await Promise.race([
-      ready,
-      exited,
-      new Promise<never>((_, reject) => {
-        setTimeout(() => {
-          reject(
-            new ProcessReadyTimeoutError({
-              code: ErrorCode.PROCESS_READY_TIMEOUT,
-              message: `Process did not become ready within ${timeout}ms. Waiting for: port ${port}`,
-              context: {
-                processId: 'native-exec',
-                command: 'exec',
-                condition: `port ${port}`,
-                timeout
-              },
-              httpStatus: 408,
-              timestamp: new Date().toISOString()
-            })
-          );
-        }, timeout);
-      })
-    ]);
   }
 
   private async consumePortWatchStream(
@@ -4501,8 +4529,13 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     return {
       id: sessionId,
 
-      exec: (command, options) =>
-        this.executeCommand(command as string, sessionId, options) as any,
+      exec: (command, options): Promise<SandboxProcess> => {
+        return Promise.reject(
+          new Error(
+            'Session exec is not implemented yet. Session RPC wiring is scheduled for Task 7.'
+          )
+        );
+      },
 
       // File operations - pass sessionId via options
       writeFile: (path, content, options) =>

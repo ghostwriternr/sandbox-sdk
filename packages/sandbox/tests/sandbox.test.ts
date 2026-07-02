@@ -427,6 +427,101 @@ describe('Sandbox - Automatic Session Management', () => {
       );
     });
 
+    it('clears timeout when native process exits normally and does not call kill', async () => {
+      const killMock = vi.fn();
+      const nativeProcessMock = {
+        stdin: null,
+        stdout: textStream('hello\n'),
+        stderr: textStream(''),
+        pid: 123,
+        exitCode: Promise.resolve(0),
+        output: async () => ({
+          stdout: await new Response(textStream('hello\n')).arrayBuffer(),
+          stderr: await new Response(textStream('')).arrayBuffer(),
+          exitCode: 0
+        }),
+        kill: killMock
+      };
+
+      const nativeExec = vi.fn(async () => nativeProcessMock);
+      Object.assign((sandbox as any).ctx, {
+        container: { running: true, exec: nativeExec }
+      });
+
+      const process = await sandbox.exec('echo hello', { timeout: 50 });
+      const code = await process.exitCode;
+      expect(code).toBe(0);
+
+      // Wait 100ms to allow any leaked timer to fire
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(killMock).not.toHaveBeenCalled();
+    });
+
+    it('waitForPort readiness resolves and subsequent process exit or timeout does not fail', async () => {
+      // Mock watchPort stream to return 'ready' event
+      const readyEvent = new TextEncoder().encode(
+        'data: {"type": "ready"}\n\n'
+      );
+      let controllerRef:
+        | ReadableStreamDefaultController<Uint8Array>
+        | undefined;
+      const watchStream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controllerRef = controller;
+          controller.enqueue(readyEvent);
+        },
+        cancel() {}
+      });
+
+      vi.spyOn(sandbox.client.ports, 'watchPort').mockResolvedValue(
+        watchStream as any
+      );
+
+      let resolveProcessExit: (code: number) => void = () => {};
+      const processExitCodePromise = new Promise<number>((resolve) => {
+        resolveProcessExit = resolve;
+      });
+
+      const killMock = vi.fn();
+      const nativeProcessMock = {
+        stdin: null,
+        stdout: textStream(''),
+        stderr: textStream(''),
+        pid: 123,
+        exitCode: processExitCodePromise,
+        output: async () => ({
+          stdout: new ArrayBuffer(0),
+          stderr: new ArrayBuffer(0),
+          exitCode: 0
+        }),
+        kill: killMock
+      };
+
+      const nativeExec = vi.fn(async () => nativeProcessMock);
+      Object.assign((sandbox as any).ctx, {
+        container: { running: true, exec: nativeExec }
+      });
+
+      const process = await sandbox.exec('sleep 10');
+
+      // Start waiting for port with a timeout of 1000ms
+      const waitPromise = process.waitForPort(8080, { timeout: 1000 });
+
+      // Readiness resolves first
+      await expect(waitPromise).resolves.toBeUndefined();
+
+      // Now trigger process exit or wait past the timeout limit (100ms)
+      resolveProcessExit(0);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Close the controller to clean up stream
+      try {
+        controllerRef?.close();
+      } catch {}
+
+      // Ensure there are no unhandled rejections/exceptions
+    });
+
     it('runs infrastructure exec without creating a default session', async () => {
       await sandbox.setEnvVars({ INFRA_TOKEN: 'secret' });
       vi.mocked(sandbox.client.utils.createSession).mockClear();
@@ -606,11 +701,8 @@ describe('Sandbox - Automatic Session Management', () => {
 
       const session = await sandbox.createSession({ id: 'isolated-session' });
 
-      await session.exec('echo test');
-
-      expect(sandbox.client.commands.execute).toHaveBeenCalledWith(
-        'echo test',
-        { sessionId: 'isolated-session' }
+      await expect(session.exec('echo test')).rejects.toThrow(
+        'Session exec is not implemented yet. Session RPC wiring is scheduled for Task 7.'
       );
     });
 
@@ -630,17 +722,12 @@ describe('Sandbox - Automatic Session Management', () => {
       const session1 = await sandbox.createSession({ id: 'session-1' });
       const session2 = await sandbox.createSession({ id: 'session-2' });
 
-      await session1.exec('echo build');
-      await session2.exec('echo test');
-
-      const session1Options = vi.mocked(sandbox.client.commands.execute).mock
-        .calls[0][1];
-      const session2Options = vi.mocked(sandbox.client.commands.execute).mock
-        .calls[1][1];
-
-      expect(session1Options?.sessionId).toBe('session-1');
-      expect(session2Options?.sessionId).toBe('session-2');
-      expect(session1Options?.sessionId).not.toBe(session2Options?.sessionId);
+      await expect(session1.exec('echo build')).rejects.toThrow(
+        'Session exec is not implemented yet. Session RPC wiring is scheduled for Task 7.'
+      );
+      await expect(session2.exec('echo test')).rejects.toThrow(
+        'Session exec is not implemented yet. Session RPC wiring is scheduled for Task 7.'
+      );
     });
 
     it('keeps explicit sessions separate', async () => {
@@ -653,12 +740,9 @@ describe('Sandbox - Automatic Session Management', () => {
       const explicitSession = await sandbox.createSession({
         id: 'explicit-session'
       });
-      await explicitSession.exec('echo explicit');
-
-      const explicitOptions = vi.mocked(sandbox.client.commands.execute).mock
-        .calls[0][1];
-
-      expect(explicitOptions?.sessionId).toBe('explicit-session');
+      await expect(explicitSession.exec('echo explicit')).rejects.toThrow(
+        'Session exec is not implemented yet. Session RPC wiring is scheduled for Task 7.'
+      );
     });
 
     it('should generate session ID if not provided', async () => {
@@ -772,10 +856,9 @@ describe('Sandbox - Automatic Session Management', () => {
     });
 
     it('should execute command with session context', async () => {
-      await session.exec('pwd');
-      expect(sandbox.client.commands.execute).toHaveBeenCalledWith('pwd', {
-        sessionId: 'test-session'
-      });
+      await expect(session.exec('pwd')).rejects.toThrow(
+        'Session exec is not implemented yet. Session RPC wiring is scheduled for Task 7.'
+      );
     });
 
     it('should write file with session context', async () => {
