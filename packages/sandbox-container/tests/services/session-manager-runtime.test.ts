@@ -3,8 +3,11 @@ import { mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CommandSession } from '@repo/sandbox-execution';
-import { createNoOpLogger, type ExecEvent } from '@repo/shared';
-import { SessionManager } from '../../src/services/session-manager';
+import { createNoOpLogger } from '@repo/shared';
+import {
+  type ExecEvent,
+  SessionManager
+} from '../../src/services/session-manager';
 
 describe('SessionManager runtime integration', () => {
   let sessionManager: SessionManager;

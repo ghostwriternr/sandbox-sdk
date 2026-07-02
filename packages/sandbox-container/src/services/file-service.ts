@@ -14,12 +14,14 @@ import {
   type FileStats,
   type MkdirOptions,
   type ReadOptions,
-  resolveExecutionTarget,
   type ServiceResult,
+  serviceError,
+  serviceSuccess,
   type WriteOptions
 } from '../core/types';
 import { FileManager } from '../managers/file-manager';
-import type { ExecutionService } from './execution-service';
+import type { RawExecResult } from '../session-types';
+import type { CommandContextService } from './command-context-service';
 
 export interface SecurityService {
   validatePath(path: string): { isValid: boolean; errors: string[] };
@@ -95,9 +97,44 @@ export class FileService implements FileSystemOperations {
   constructor(
     private security: SecurityService,
     private logger: Logger,
-    private executionService: ExecutionService
+    private commandContextService: CommandContextService
   ) {
     this.manager = new FileManager();
+  }
+
+  private async withExecutionInternal<T>(
+    sessionId: string | undefined,
+    fn: (exec: any) => Promise<T>
+  ): Promise<ServiceResult<T>> {
+    try {
+      const data = await this.commandContextService.withExecution(
+        { sessionId },
+        fn
+      );
+      return serviceSuccess(data);
+    } catch (error) {
+      return serviceError(error as any);
+    }
+  }
+
+  private async executeInternal(
+    command: string,
+    sessionId: string | undefined,
+    options: {
+      cwd?: string;
+      env?: Record<string, string | undefined>;
+      origin?: 'user' | 'internal';
+    } = {}
+  ): Promise<ServiceResult<RawExecResult>> {
+    try {
+      const result = await this.commandContextService.run(command, {
+        sessionId,
+        ...options
+      });
+      return serviceSuccess(result);
+    } catch (error) {
+      return serviceError(error as any);
+    }
   }
 
   async read(
@@ -134,106 +171,104 @@ export class FileService implements FileSystemOperations {
         };
       }
 
-      const result = await this.executionService
-        .withExecution(
-          { target: resolveExecutionTarget(sessionId) },
-          async (exec) => {
-            const absolutePath = await this.resolvePathInSession(path, exec);
+      const result = await this.withExecutionInternal(
+        sessionId,
+        async (exec) => {
+          const absolutePath = await this.resolvePathInSession(path, exec);
 
-            const bunFile = Bun.file(absolutePath);
+          const bunFile = Bun.file(absolutePath);
 
-            const fileExists = await bunFile.exists();
-            if (!fileExists) {
-              throw {
-                message: `File not found: ${path}`,
-                code: ErrorCode.FILE_NOT_FOUND,
-                details: {
-                  path,
-                  operation: Operation.FILE_READ
-                } satisfies FileNotFoundContext
-              };
-            }
-
-            // Size and MIME type come directly from the BunFile object.
-            const fileSize = bunFile.size;
-            // Encoded responses have a hard limit of 32 MiB. Larger files should use readFile() with { encoding: 'none' }.
-            if (fileSize > MAX_ENCODED_FILE_SIZE) {
-              throw {
-                message: `File too large. Size ${fileSize} bytes exceeds the 32 MiB limit. Use readFile() with { encoding: 'none' } for large files.`,
-                code: ErrorCode.FILE_TOO_LARGE,
-                details: {
-                  path,
-                  operation: Operation.FILE_READ,
-                  actualSize: fileSize,
-                  maxSize: MAX_ENCODED_FILE_SIZE
-                } satisfies FileTooLargeContext
-              };
-            }
-
-            // Bun.file() derives the MIME type from the file extension and falls back
-            // to 'application/octet-stream' for unknown types.
-            let mimeType = bunFile.type.split(';')[0].trim();
-            if (mimeType === 'application/octet-stream') {
-              const escapedPath = shellEscape(path);
-              const mimeResult = await exec(
-                `file --mime-type -b ${escapedPath}`,
-                { origin: 'internal' }
-              );
-              if (mimeResult.exitCode === 0) {
-                mimeType = mimeResult.stdout.trim();
-              }
-            }
-
-            const isBinary = this.isBinaryMimeType(mimeType);
-
-            // Determine encoding: honour explicit caller preference, otherwise fall
-            // back to MIME-based detection.
-            let actualEncoding: 'utf-8' | 'base64';
-            if (options.encoding === 'base64') {
-              actualEncoding = 'base64';
-            } else if (
-              options.encoding === 'utf-8' ||
-              options.encoding === 'utf8'
-            ) {
-              actualEncoding = 'utf-8';
-            } else {
-              actualEncoding = isBinary ? 'base64' : 'utf-8';
-            }
-
-            // 3. Read file content natively.
-            let content: string;
-            if (actualEncoding === 'base64') {
-              const buffer = await bunFile.arrayBuffer();
-              content = Buffer.from(buffer).toString('base64');
-            } else {
-              content = await bunFile.text();
-            }
-
-            sizeBytes = fileSize;
-
-            return {
-              success: true as const,
-              content,
-              metadata: {
-                encoding: actualEncoding,
-                isBinary: actualEncoding === 'base64',
-                mimeType,
-                size: fileSize
-              }
+          const fileExists = await bunFile.exists();
+          if (!fileExists) {
+            throw {
+              message: `File not found: ${path}`,
+              code: ErrorCode.FILE_NOT_FOUND,
+              details: {
+                path,
+                operation: Operation.FILE_READ
+              } satisfies FileNotFoundContext
             };
           }
-        )
-        .then((r) => {
-          if (!r.success) {
-            return r as ServiceResult<string, FileMetadata>;
+
+          // Size and MIME type come directly from the BunFile object.
+          const fileSize = bunFile.size;
+          // Encoded responses have a hard limit of 32 MiB. Larger files should use readFile() with { encoding: 'none' }.
+          if (fileSize > MAX_ENCODED_FILE_SIZE) {
+            throw {
+              message: `File too large. Size ${fileSize} bytes exceeds the 32 MiB limit. Use readFile() with { encoding: 'none' } for large files.`,
+              code: ErrorCode.FILE_TOO_LARGE,
+              details: {
+                path,
+                operation: Operation.FILE_READ,
+                actualSize: fileSize,
+                maxSize: MAX_ENCODED_FILE_SIZE
+              } satisfies FileTooLargeContext
+            };
           }
+
+          // Bun.file() derives the MIME type from the file extension and falls back
+          // to 'application/octet-stream' for unknown types.
+          let mimeType = bunFile.type.split(';')[0].trim();
+          if (mimeType === 'application/octet-stream') {
+            const escapedPath = shellEscape(path);
+            const mimeResult = await exec(
+              `file --mime-type -b ${escapedPath}`,
+              { origin: 'internal' }
+            );
+            if (mimeResult.exitCode === 0) {
+              mimeType = mimeResult.stdout.trim();
+            }
+          }
+
+          const isBinary = this.isBinaryMimeType(mimeType);
+
+          // Determine encoding: honour explicit caller preference, otherwise fall
+          // back to MIME-based detection.
+          let actualEncoding: 'utf-8' | 'base64';
+          if (options.encoding === 'base64') {
+            actualEncoding = 'base64';
+          } else if (
+            options.encoding === 'utf-8' ||
+            options.encoding === 'utf8'
+          ) {
+            actualEncoding = 'utf-8';
+          } else {
+            actualEncoding = isBinary ? 'base64' : 'utf-8';
+          }
+
+          // 3. Read file content natively.
+          let content: string;
+          if (actualEncoding === 'base64') {
+            const buffer = await bunFile.arrayBuffer();
+            content = Buffer.from(buffer).toString('base64');
+          } else {
+            content = await bunFile.text();
+          }
+
+          sizeBytes = fileSize;
 
           return {
             success: true as const,
-            data: r.data.content,
-            metadata: r.data.metadata
+            content,
+            metadata: {
+              encoding: actualEncoding,
+              isBinary: actualEncoding === 'base64',
+              mimeType,
+              size: fileSize
+            }
           };
-        });
+        }
+      ).then((r) => {
+        if (!r.success) {
+          return r as ServiceResult<string, FileMetadata>;
+        }
+
+        return {
+          success: true as const,
+          data: r.data.content,
+          metadata: r.data.metadata
+        };
+      });
 
       outcome = result.success ? 'success' : 'error';
       if (!result.success) {
@@ -327,8 +362,8 @@ export class FileService implements FileSystemOperations {
         }
       }
 
-      const writeResult = await this.executionService.withExecution(
-        { target: resolveExecutionTarget(sessionId) },
+      const writeResult = await this.withExecutionInternal(
+        sessionId,
         async (exec) => {
           let targetPath = path;
 
@@ -448,8 +483,8 @@ export class FileService implements FileSystemOperations {
         };
       }
 
-      const result = await this.executionService.withExecution(
-        { target: resolveExecutionTarget(sessionId) },
+      const result = await this.withExecutionInternal(
+        sessionId,
         async (exec) => {
           const resolvedPath = await this.resolvePathInSession(path, exec);
           const escapedPath = shellEscape(resolvedPath);
@@ -577,8 +612,8 @@ export class FileService implements FileSystemOperations {
         };
       }
 
-      const execResult = await this.executionService.withExecution(
-        { target: resolveExecutionTarget(sessionId) },
+      const execResult = await this.withExecutionInternal<RawExecResult>(
+        sessionId,
         async (exec) => {
           const resolvedOldPath = await this.resolvePathInSession(
             oldPath,
@@ -680,8 +715,8 @@ export class FileService implements FileSystemOperations {
         };
       }
 
-      const execResult = await this.executionService.withExecution(
-        { target: resolveExecutionTarget(sessionId) },
+      const execResult = await this.withExecutionInternal<RawExecResult>(
+        sessionId,
         async (exec) => {
           const resolvedSourcePath = await this.resolvePathInSession(
             sourcePath,
@@ -786,8 +821,7 @@ export class FileService implements FileSystemOperations {
       command += ` ${escapedPath}`;
 
       // 4. Create directory using the unified execution path
-      const execResult = await this.executionService.execute(command, {
-        target: resolveExecutionTarget(sessionId),
+      const execResult = await this.executeInternal(command, sessionId, {
         origin: 'internal'
       });
 
@@ -880,8 +914,7 @@ export class FileService implements FileSystemOperations {
       const escapedPath = shellEscape(path);
       const command = `test -e ${escapedPath}`;
 
-      const execResult = await this.executionService.execute(command, {
-        target: resolveExecutionTarget(sessionId),
+      const execResult = await this.executeInternal(command, sessionId, {
         origin: 'internal'
       });
 
@@ -977,8 +1010,7 @@ export class FileService implements FileSystemOperations {
       const command = `stat ${statCmd.args[0]} ${statCmd.args[1]} ${escapedPath}`;
 
       // 5. Get file stats using the unified execution path
-      const execResult = await this.executionService.execute(command, {
-        target: resolveExecutionTarget(sessionId),
+      const execResult = await this.executeInternal(command, sessionId, {
         origin: 'internal'
       });
 
@@ -1180,8 +1212,8 @@ export class FileService implements FileSystemOperations {
         };
       }
 
-      const writeResult = await this.executionService.withExecution(
-        { target: resolveExecutionTarget(sessionId) },
+      const writeResult = await this.withExecutionInternal(
+        sessionId,
         async (exec) => {
           let targetPath = path;
 
@@ -1413,8 +1445,7 @@ export class FileService implements FileSystemOperations {
       // Skip the base directory itself and format output
       findCommand += ` -not -path ${escapedPath} -printf '%p\\t%y\\t%s\\t%TY-%Tm-%TdT%TH:%TM:%TS\\t%m\\n'`;
 
-      const execResult = await this.executionService.execute(findCommand, {
-        target: resolveExecutionTarget(sessionId),
+      const execResult = await this.executeInternal(findCommand, sessionId, {
         origin: 'internal'
       });
 
@@ -1603,119 +1634,114 @@ export class FileService implements FileSystemOperations {
 
     const CHUNK_SIZE = 65535;
 
-    return await this.executionService
-      .withExecution(
-        { target: resolveExecutionTarget(sessionId) },
-        async (exec) => {
-          const absolutePath = await this.resolvePathInSession(path, exec);
-          const metadataResult = await this.getFileMetadata(absolutePath, exec);
+    return await this.withExecutionInternal(sessionId, async (exec) => {
+      const absolutePath = await this.resolvePathInSession(path, exec);
+      const metadataResult = await this.getFileMetadata(absolutePath, exec);
 
-          if (!metadataResult.success) {
-            return new ReadableStream({
-              start(controller) {
-                const errorEvent = {
-                  type: 'error',
-                  error: metadataResult.error.message
-                };
-                controller.enqueue(
-                  encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`)
-                );
-                controller.close();
-              }
-            });
+      if (!metadataResult.success) {
+        return new ReadableStream({
+          start(controller) {
+            const errorEvent = {
+              type: 'error',
+              error: metadataResult.error.message
+            };
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`)
+            );
+            controller.close();
+          }
+        });
+      }
+
+      const metadata = metadataResult.data;
+
+      const fileStream = Bun.file(absolutePath).stream();
+
+      // Carry-over buffer for chunks that arrive smaller than CHUNK_SIZE from
+      // Bun's internal read buffer so we always emit full-sized SSE events.
+      let carry = new Uint8Array(0);
+      let totalBytesEmitted = 0;
+
+      const sseTransform = new TransformStream<Uint8Array, Uint8Array>({
+        start(controller) {
+          // Emit the metadata SSE event as the very first bytes of the stream.
+          const metadataEvent = {
+            type: 'metadata',
+            mimeType: metadata.mimeType,
+            size: metadata.size,
+            isBinary: metadata.isBinary,
+            encoding: metadata.encoding
+          };
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(metadataEvent)}\n\n`)
+          );
+        },
+
+        transform(incoming, controller) {
+          const combined = new Uint8Array(carry.length + incoming.length);
+          combined.set(carry);
+          combined.set(incoming, carry.length);
+
+          let offset = 0;
+          while (offset + CHUNK_SIZE <= combined.length) {
+            const slice = combined.subarray(offset, offset + CHUNK_SIZE);
+            emitChunk(
+              slice,
+              metadata.isBinary,
+              encoder,
+              decoder,
+              controller,
+              true
+            );
+            totalBytesEmitted += slice.length;
+            offset += CHUNK_SIZE;
           }
 
-          const metadata = metadataResult.data;
+          carry = combined.subarray(offset);
+        },
 
-          const fileStream = Bun.file(absolutePath).stream();
-
-          // Carry-over buffer for chunks that arrive smaller than CHUNK_SIZE from
-          // Bun's internal read buffer so we always emit full-sized SSE events.
-          let carry = new Uint8Array(0);
-          let totalBytesEmitted = 0;
-
-          const sseTransform = new TransformStream<Uint8Array, Uint8Array>({
-            start(controller) {
-              // Emit the metadata SSE event as the very first bytes of the stream.
-              const metadataEvent = {
-                type: 'metadata',
-                mimeType: metadata.mimeType,
-                size: metadata.size,
-                isBinary: metadata.isBinary,
-                encoding: metadata.encoding
-              };
+        flush(controller) {
+          if (carry.length > 0) {
+            emitChunk(
+              carry,
+              metadata.isBinary,
+              encoder,
+              decoder,
+              controller,
+              false
+            );
+            totalBytesEmitted += carry.length;
+            carry = new Uint8Array(0);
+          }
+          if (!metadata.isBinary) {
+            const remaining = decoder.decode();
+            if (remaining.length > 0) {
+              const chunkEvent = { type: 'chunk', data: remaining };
               controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify(metadataEvent)}\n\n`)
-              );
-            },
-
-            transform(incoming, controller) {
-              const combined = new Uint8Array(carry.length + incoming.length);
-              combined.set(carry);
-              combined.set(incoming, carry.length);
-
-              let offset = 0;
-              while (offset + CHUNK_SIZE <= combined.length) {
-                const slice = combined.subarray(offset, offset + CHUNK_SIZE);
-                emitChunk(
-                  slice,
-                  metadata.isBinary,
-                  encoder,
-                  decoder,
-                  controller,
-                  true
-                );
-                totalBytesEmitted += slice.length;
-                offset += CHUNK_SIZE;
-              }
-
-              carry = combined.subarray(offset);
-            },
-
-            flush(controller) {
-              if (carry.length > 0) {
-                emitChunk(
-                  carry,
-                  metadata.isBinary,
-                  encoder,
-                  decoder,
-                  controller,
-                  false
-                );
-                totalBytesEmitted += carry.length;
-                carry = new Uint8Array(0);
-              }
-              if (!metadata.isBinary) {
-                const remaining = decoder.decode();
-                if (remaining.length > 0) {
-                  const chunkEvent = { type: 'chunk', data: remaining };
-                  controller.enqueue(
-                    encoder.encode(`data: ${JSON.stringify(chunkEvent)}\n\n`)
-                  );
-                }
-              }
-
-              const completeEvent = {
-                type: 'complete',
-                bytesRead: totalBytesEmitted
-              };
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify(completeEvent)}\n\n`)
+                encoder.encode(`data: ${JSON.stringify(chunkEvent)}\n\n`)
               );
             }
-          });
+          }
 
-          return fileStream.pipeThrough(sseTransform);
-        }
-      )
-      .then((result) => {
-        if (!result.success) {
-          throw new Error(
-            `Failed to create file stream: ${result.error.message}`
+          const completeEvent = {
+            type: 'complete',
+            bytesRead: totalBytesEmitted
+          };
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(completeEvent)}\n\n`)
           );
         }
-        return result.data;
       });
+
+      return fileStream.pipeThrough(sseTransform);
+    }).then((result) => {
+      if (!result.success) {
+        throw new Error(
+          `Failed to create file stream: ${result.error.message}`
+        );
+      }
+      return result.data;
+    });
   }
 
   /*
@@ -1764,9 +1790,8 @@ export class FileService implements FileSystemOperations {
     // Resolve relative paths via the session's working directory.
     let resolvedPath = path;
     if (!path.startsWith('/')) {
-      const result = await this.executionService.withExecution(
-        { target: resolveExecutionTarget(sessionId) },
-        async (exec) => this.resolvePathInSession(path, exec)
+      const result = await this.withExecutionInternal(sessionId, async (exec) =>
+        this.resolvePathInSession(path, exec)
       );
       if (!result.success) {
         return {

@@ -7,7 +7,7 @@ import {
   type ServiceResult
 } from '@sandbox-container/core/types';
 import { DEFAULT_GIT_CLONE_TIMEOUT_MS } from '@sandbox-container/managers/git-manager';
-import type { ExecutionService } from '@sandbox-container/services/execution-service';
+import type { CommandContextService } from '@sandbox-container/services/command-context-service';
 import {
   GitService,
   type SecurityService
@@ -45,12 +45,11 @@ const mockSessionManager = {
   withSession: vi.fn()
 } as unknown as SessionManager;
 
-const mockExecutionService = {
-  execute: vi.fn(),
-  startProcessStream: vi.fn(),
-  withExecution: vi.fn(),
-  kill: vi.fn()
-} as unknown as ExecutionService;
+// Mock CommandContextService with proper typing
+const mockCommandContextService = {
+  run: vi.fn(),
+  withExecution: vi.fn()
+} as unknown as CommandContextService;
 
 describe('GitService', () => {
   let gitService: GitService;
@@ -69,11 +68,9 @@ describe('GitService', () => {
       errors: []
     });
 
-    mocked(mockExecutionService.execute).mockImplementation(
+    mocked(mockCommandContextService.run).mockImplementation(
       async (command, options = {}) => {
-        const sessionId = getExecutionTargetDisplayName(
-          options.target ?? { kind: 'sessionless' }
-        );
+        const sessionId = options.sessionId ?? 'sessionless';
         const forwardedOptions =
           options.cwd !== undefined ||
           options.env !== undefined ||
@@ -85,63 +82,54 @@ describe('GitService', () => {
               }
             : undefined;
 
-        return forwardedOptions !== undefined
-          ? await mockSessionManager.executeInSession(
-              sessionId,
-              command,
-              forwardedOptions
-            )
-          : await mockSessionManager.executeInSession(sessionId, command);
+        const result =
+          forwardedOptions !== undefined
+            ? await mockSessionManager.executeInSession(
+                sessionId,
+                command,
+                forwardedOptions
+              )
+            : await mockSessionManager.executeInSession(sessionId, command);
+
+        if (!result.success) {
+          throw result.error;
+        }
+        return { ...result.data, success: result.data.exitCode === 0 };
       }
     );
 
-    mocked(mockExecutionService.withExecution).mockImplementation(
-      async ({ target }, callback) => {
+    mocked(mockCommandContextService.withExecution).mockImplementation(
+      async (options, callback) => {
         try {
           const mockExec = async (
             cmd: string,
-            options?: {
+            execOpts?: {
               cwd?: string;
               env?: Record<string, string | undefined>;
               timeoutMs?: number;
               origin?: 'user' | 'internal';
             }
           ) => {
-            const result = await mockExecutionService.execute(cmd, {
-              target,
-              cwd: options?.cwd,
-              env: options?.env,
-              timeoutMs: options?.timeoutMs,
-              origin: options?.origin
+            const result = await mockCommandContextService.run(cmd, {
+              sessionId: options.sessionId,
+              cwd: execOpts?.cwd,
+              env: execOpts?.env,
+              timeoutMs: execOpts?.timeoutMs,
+              origin: execOpts?.origin
             });
-            if (result.success) {
-              return result.data;
-            }
-            throw result.error;
+            return result;
           };
           const data = await callback(mockExec);
-          return { success: true, data } as any;
+          return data;
         } catch (error: any) {
-          // If error has code/message/details, return it as-is
-          if (error && typeof error === 'object' && 'code' in error) {
-            return { success: false, error } as any;
-          }
-          // Otherwise wrap as generic error
-          return {
-            success: false,
-            error: {
-              code: 'INTERNAL_ERROR',
-              message: error instanceof Error ? error.message : 'Unknown error',
-              details: {}
-            }
-          } as any;
+          throw error;
         }
       }
     );
 
     gitService = new GitService(
       mockSecurityService,
-      mockExecutionService,
+      mockCommandContextService,
       mockLogger
     );
   });

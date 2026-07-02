@@ -6,13 +6,12 @@ import {
 } from '@repo/shared/backup';
 import { ErrorCode, Operation } from '@repo/shared/errors';
 import {
-  resolveExecutionTarget,
   type ServiceResult,
   serviceError,
   serviceSuccess
 } from '../core/types';
 import type { RawExecResult } from '../session-types';
-import type { ExecutionService } from './execution-service';
+import type { CommandContextService } from './command-context-service';
 
 export const BACKUP_WORK_DIR = '/var/backups';
 const BACKUP_MOUNTS_DIR = '/var/backups/mounts';
@@ -121,17 +120,28 @@ interface UploadedBackupPart {
 export class BackupService {
   constructor(
     private logger: Logger,
-    private executionService: ExecutionService
+    private commandContextService: CommandContextService
   ) {}
 
   private async executeInternal(
     sessionId: string | undefined,
     command: string
   ): Promise<ServiceResult<RawExecResult>> {
-    return this.executionService.execute(command, {
-      target: resolveExecutionTarget(sessionId),
-      origin: 'internal'
-    });
+    try {
+      const result = await this.commandContextService.run(command, {
+        sessionId,
+        origin: 'internal'
+      });
+      return {
+        success: true,
+        data: result
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error as any
+      };
+    }
   }
 
   /**

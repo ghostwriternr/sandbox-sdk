@@ -5,10 +5,12 @@ import {
   type CommandSessionProcess
 } from '@repo/sandbox-execution';
 import {
-  type ExecEvent,
+  type ExecOptions,
   type Logger,
   logCanonicalEvent,
   partitionEnvVars,
+  type SandboxCommand,
+  type SessionExecStartResult,
   shellEscape
 } from '@repo/shared';
 import type {
@@ -28,6 +30,18 @@ import {
 } from '../core/types';
 import { SessionDestroyedError, ShellTerminatedError } from '../errors';
 import type { RawExecResult, SessionOptions } from '../session-types';
+
+export interface ExecEvent {
+  type: 'start' | 'stdout' | 'stderr' | 'complete' | 'error';
+  timestamp: string;
+  data?: string;
+  command?: string;
+  exitCode?: number;
+  result?: any;
+  error?: string;
+  sessionId?: string;
+  pid?: number;
+}
 
 type RuntimeProcessStreamOptions = {
   commandId: string;
@@ -55,6 +69,10 @@ interface ManagedSession {
     command: string,
     options?: ManagedSessionExecOptions
   ): Promise<RawExecResult>;
+  execProcess(
+    command: SandboxCommand,
+    options?: ExecOptions
+  ): Promise<CommandSessionProcess>;
   startRuntimeProcessStream(
     command: string,
     options: RuntimeProcessStreamOptions
@@ -150,11 +168,14 @@ class RuntimeBackedSession implements ManagedSession {
         timeoutMs: options?.timeoutMs ?? this.runtimeOptions.commandTimeoutMs
       });
 
+      const output = await result.output();
+      const decoder = new TextDecoder();
+
       return {
         command,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        exitCode: result.exitCode,
+        stdout: decoder.decode(output.stdout),
+        stderr: decoder.decode(output.stderr),
+        exitCode: output.exitCode,
         duration: Date.now() - startTime,
         timestamp: new Date(startTime).toISOString()
       };
@@ -168,6 +189,20 @@ class RuntimeBackedSession implements ManagedSession {
       }
       throw error;
     }
+  }
+
+  async execProcess(
+    command: SandboxCommand,
+    options?: ExecOptions
+  ): Promise<CommandSessionProcess> {
+    if (!this.runtimeSession) {
+      throw new Error('Runtime command session is not initialized');
+    }
+    return this.runtimeSession.exec(command, {
+      cwd: options?.cwd,
+      env: options?.env,
+      timeoutMs: options?.timeout
+    });
   }
 
   isReady(): boolean {
@@ -224,29 +259,30 @@ class RuntimeBackedSession implements ManagedSession {
         type: 'start',
         timestamp: new Date().toISOString(),
         command,
-        pid: process.getPID()
+        pid: process.pid
       };
 
-      const completion = process
-        .wait()
-        .then((result) => {
+      const completion = (async () => {
+        try {
+          const exitCode = await process.exitCode;
+          const output = await process.output();
+          const decoder = new TextDecoder();
           const duration = Date.now() - startTime;
           outputEvents.push({
             type: 'complete',
-            exitCode: result.exitCode,
+            exitCode,
             timestamp: new Date().toISOString(),
             result: {
-              stdout: result.stdout,
-              stderr: result.stderr,
-              exitCode: result.exitCode,
-              success: result.exitCode === 0,
+              stdout: decoder.decode(output.stdout),
+              stderr: decoder.decode(output.stderr),
+              exitCode,
+              success: exitCode === 0,
               command,
               duration,
               timestamp: new Date(startTime).toISOString()
             }
           });
-        })
-        .catch((error) => {
+        } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
           outputEvents.push({
@@ -254,14 +290,14 @@ class RuntimeBackedSession implements ManagedSession {
             timestamp: new Date().toISOString(),
             error: message
           });
-        })
-        .finally(() => {
+        } finally {
           completed = true;
           if (this.runtimeProcesses.get(options.commandId) === runtimeProcess) {
             this.runtimeProcesses.delete(options.commandId);
           }
           outputEvents.close();
-        });
+        }
+      })();
 
       try {
         for await (const event of outputEvents) {
@@ -271,7 +307,7 @@ class RuntimeBackedSession implements ManagedSession {
       } finally {
         if (!completed) {
           runtimeProcess.controller.abort();
-          await runtimeProcess.process?.terminate().catch(() => {});
+          await runtimeProcess.process?.kill();
           if (this.runtimeProcesses.get(options.commandId) === runtimeProcess) {
             this.runtimeProcesses.delete(options.commandId);
           }
@@ -1337,6 +1373,35 @@ export class SessionManager {
         }
       };
     }
+  }
+
+  async execProcess(
+    sessionId: string,
+    command: SandboxCommand,
+    options: ExecOptions = {}
+  ): Promise<SessionExecStartResult> {
+    const lock = this.getSessionLock(sessionId);
+    const process = await lock.runExclusive(async () => {
+      const sessionResult = await this.getOrCreateSession(sessionId, {
+        cwd: options.cwd
+      });
+      if (!sessionResult.success) {
+        throw sessionResult.error;
+      }
+      const session = sessionResult.data;
+      return await session.execProcess(command, options);
+    });
+
+    return {
+      processId: crypto.randomUUID(),
+      pid: process.pid,
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      exitCode: process.exitCode,
+      output: () => process.output(),
+      kill: (signal?: number) => process.kill(signal)
+    };
   }
 
   /**

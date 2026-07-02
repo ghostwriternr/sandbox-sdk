@@ -5,7 +5,7 @@ import {
   type ServiceResult
 } from '@sandbox-container/core/types';
 import { BackupService } from '@sandbox-container/services/backup-service';
-import type { ExecutionService } from '@sandbox-container/services/execution-service';
+import type { CommandContextService } from '@sandbox-container/services/command-context-service';
 import type { RawExecResult } from '@sandbox-container/session-types';
 import { mocked } from '../test-utils';
 
@@ -31,12 +31,11 @@ const mockSessionManager = {
   withSession: vi.fn()
 };
 
-const mockExecutionService = {
-  execute: vi.fn(),
-  startProcessStream: vi.fn(),
-  withExecution: vi.fn(),
-  kill: vi.fn()
-} as unknown as ExecutionService;
+// Mock CommandContextService with proper typing
+const mockCommandContextService = {
+  run: vi.fn(),
+  withExecution: vi.fn()
+} as unknown as CommandContextService;
 
 const mockFetch = vi.fn();
 let originalFetch: typeof fetch;
@@ -70,15 +69,20 @@ describe('BackupService', () => {
     vi.clearAllMocks();
     originalFetch = global.fetch;
     global.fetch = mockFetch as unknown as typeof fetch;
-    mocked(mockExecutionService.execute).mockImplementation(
+    mocked(mockCommandContextService.run).mockImplementation(
       async (command, options = {}) => {
-        const sessionId = getExecutionTargetDisplayName(
-          options.target ?? { kind: 'sessionless' }
+        const sessionId = options.sessionId ?? 'sessionless';
+        const result = await mockSessionManager.executeInSession(
+          sessionId,
+          command
         );
-        return await mockSessionManager.executeInSession(sessionId, command);
+        if (!result.success) {
+          throw result.error;
+        }
+        return result.data;
       }
     );
-    service = new BackupService(mockLogger, mockExecutionService);
+    service = new BackupService(mockLogger, mockCommandContextService);
   });
 
   afterEach(() => {

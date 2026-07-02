@@ -44,14 +44,14 @@ import type { BackupService } from '../services/backup-service';
 import type { FileService } from '../services/file-service';
 import type { GitService } from '../services/git-service';
 import type { PortService } from '../services/port-service';
-import type { ProcessService } from '../services/process-service';
 import type { SessionManager } from '../services/session-manager';
+import type { SessionService } from '../services/session-service';
 import type { TerminalManager } from '../services/terminal-manager';
 import type { TunnelService } from '../services/tunnel-service';
 import type { WatchService } from '../services/watch-service';
 
 export interface SandboxAPIDeps {
-  processService: ProcessService;
+  sessionService: SessionService;
   fileService: FileService;
   portService: PortService;
   gitService: GitService;
@@ -96,7 +96,7 @@ export class SandboxControlAPI extends RpcTarget implements SandboxAPI {
   constructor(deps: SandboxAPIDeps) {
     super();
     this.#deps = deps;
-    this.sessions = new SessionsRPCAPI(deps.sessionManager);
+    this.sessions = new SessionsRPCAPI(deps.sessionService);
   }
 
   // --- Domain sub-stubs (nested RpcTargets) --------------------------------
@@ -105,7 +105,7 @@ export class SandboxControlAPI extends RpcTarget implements SandboxAPI {
     return new FilesRPCAPI(this.#deps.fileService);
   }
   get ports() {
-    return new PortsRPCAPI(this.#deps.portService, this.#deps.processService);
+    return new PortsRPCAPI(this.#deps.portService);
   }
   get git() {
     return new GitRPCAPI(this.#deps.gitService);
@@ -168,9 +168,9 @@ class TerminalsRPCAPI extends RpcTarget {
 // ===========================================================================
 
 class SessionsRPCAPI extends RpcTarget {
-  #svc: SessionManager;
+  #svc: SessionService;
 
-  constructor(svc: SessionManager) {
+  constructor(svc: SessionService) {
     super();
     this.#svc = svc;
   }
@@ -178,49 +178,23 @@ class SessionsRPCAPI extends RpcTarget {
   async create(
     options: SessionCreateOptions = { id: '' }
   ): Promise<SessionCreateResult> {
-    const sessionOpts = {
-      ...options,
-      id: options.id || crypto.randomUUID()
-    };
-    const result = await this.#svc.createSession(sessionOpts);
-    const session = extractData<{ id: string; name?: string; cwd?: string }>(
-      result
-    );
-    return {
-      success: true,
-      sessionId: session.id,
-      name: session.name,
-      cwd: session.cwd,
-      timestamp: new Date().toISOString()
-    };
+    return this.#svc.create(options);
   }
 
   async delete(sessionId: string): Promise<SessionDeleteResult> {
-    const result = await this.#svc.deleteSession(sessionId);
-    throwIfError(result);
-    return {
-      success: true,
-      sessionId,
-      timestamp: new Date().toISOString()
-    };
+    return this.#svc.delete(sessionId);
   }
 
   async list(): Promise<SessionListResult> {
-    const result = await this.#svc.listSessions();
-    const sessions = extractData<string[]>(result);
-    return {
-      success: true,
-      sessions: sessions.map((id) => ({ id })),
-      timestamp: new Date().toISOString()
-    };
+    return this.#svc.list();
   }
 
   async exec(
-    _sessionId: string,
-    _command: SandboxCommand,
-    _options: ExecOptions = {}
+    sessionId: string,
+    command: SandboxCommand,
+    options: ExecOptions = {}
   ): Promise<SessionExecStartResult> {
-    throw new Error('exec in SessionService is not implemented yet');
+    return this.#svc.exec(sessionId, command, options);
   }
 }
 
@@ -451,11 +425,9 @@ class FilesRPCAPI extends RpcTarget {
 
 class PortsRPCAPI extends RpcTarget {
   #portSvc: PortService;
-  #procSvc: ProcessService;
-  constructor(portSvc: PortService, procSvc: ProcessService) {
+  constructor(portSvc: PortService) {
     super();
     this.#portSvc = portSvc;
-    this.#procSvc = procSvc;
   }
 
   async watchPort(request: {
@@ -468,17 +440,8 @@ class PortsRPCAPI extends RpcTarget {
     interval?: number;
   }): Promise<ReadableStream<Uint8Array>> {
     const encoder = new TextEncoder();
-    const {
-      port,
-      mode,
-      path,
-      statusMin,
-      statusMax,
-      processId,
-      interval = 500
-    } = request;
+    const { port, mode, path, statusMin, statusMax, interval = 500 } = request;
     const portSvc = this.#portSvc;
-    const procSvc = this.#procSvc;
     let cancelled = false;
     const clampedInterval = Math.max(100, Math.min(interval, 10000));
 
@@ -492,24 +455,6 @@ class PortsRPCAPI extends RpcTarget {
         emit({ type: 'watching', port });
         try {
           while (!cancelled) {
-            if (processId) {
-              const processResult = await procSvc.getProcess(processId);
-              if (!processResult.success) {
-                emit({ type: 'error', port, error: 'Process not found' });
-                return;
-              }
-              const proc = processResult.data;
-              if (
-                ['completed', 'failed', 'killed', 'error'].includes(proc.status)
-              ) {
-                emit({
-                  type: 'process_exited',
-                  port,
-                  exitCode: proc.exitCode ?? undefined
-                });
-                return;
-              }
-            }
             const result = await portSvc.checkPortReady({
               port,
               mode,

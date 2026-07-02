@@ -61,7 +61,7 @@ async function createApplication(): Promise<{
 
   // Create the control-plane API that calls services directly.
   const controlPlaneAPI = new SandboxControlAPI({
-    processService: container.get('processService'),
+    sessionService: container.get('sessionService'),
     fileService: container.get('fileService'),
     portService: container.get('portService'),
     gitService: container.get('gitService'),
@@ -253,7 +253,7 @@ export async function startServer(): Promise<ServerInstance> {
       if (!app.container.isInitialized()) return;
 
       try {
-        const processService = app.container.get('processService');
+        const sessionManager = app.container.get('sessionManager');
         const portService = app.container.get('portService');
         const watchService = app.container.get('watchService');
         const tunnelService = app.container.get('tunnelService');
@@ -267,7 +267,7 @@ export async function startServer(): Promise<ServerInstance> {
           });
         }
 
-        await processService.destroy();
+        await sessionManager.destroy();
         portService.destroy();
         await tunnelService.destroyAll();
         await terminalManager.destroyAll();
