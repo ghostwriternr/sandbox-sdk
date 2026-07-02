@@ -14,7 +14,6 @@ import {
  * - Dockerfile ENV (base level, e.g. SANDBOX_VERSION)
  * - setEnvVars at session level
  * - Per-command env in exec()
- * - Per-process env in startProcess()
  *
  * Override precedence (highest to lowest):
  * 1. Per-command env

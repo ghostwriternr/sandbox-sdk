@@ -14,9 +14,9 @@ import { createMockControlClient } from './helpers/mock-control-client';
 
 vi.mock('@cloudflare/containers', () => {
   const MockContainer = class Container {
-    ctx: any;
-    env: any;
-    constructor(ctx: any, env: any) {
+    ctx: unknown;
+    env: unknown;
+    constructor(ctx: unknown, env: unknown) {
       this.ctx = ctx;
       this.env = env;
     }
@@ -35,9 +35,9 @@ vi.mock('@cloudflare/containers', () => {
   return {
     Container: MockContainer,
     ContainerProxy: class ContainerProxy {
-      ctx: any;
-      env: any;
-      constructor(ctx: any, env: any) {
+      ctx: unknown;
+      env: unknown;
+      constructor(ctx: unknown, env: unknown) {
         this.ctx = ctx;
         this.env = env;
       }
