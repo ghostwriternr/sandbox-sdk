@@ -47,12 +47,6 @@ export interface ExecutionOptions {
 export interface ProcessStreamStartOptions extends ExecutionOptions {
   onEvent: (event: ExecEvent) => Promise<void>;
   commandId: string;
-  /**
-   * Optional standard input stream piped into the spawned command. The
-   * stream is consumed by the container side; bytes flow until the stream
-   * ends or the command exits.
-   */
-  stdin?: ReadableStream<Uint8Array>;
 }
 
 export interface ProcessStreamStartResult {
@@ -187,15 +181,11 @@ export class ExecutionService {
     }
   }
 
-  async kill(
-    handle: ProcessCommandHandle,
-    signal: NodeJS.Signals = 'SIGTERM'
-  ): Promise<ServiceResult<void>> {
+  async kill(handle: ProcessCommandHandle): Promise<ServiceResult<void>> {
     if (handle.target.kind === 'session') {
       return this.sessionManager.killCommand(
         handle.target.sessionId,
-        handle.commandId,
-        signal
+        handle.commandId
       );
     }
 
@@ -211,7 +201,7 @@ export class ExecutionService {
     }
 
     try {
-      await process.kill(signal);
+      await process.kill();
       return { success: true };
     } catch (error) {
       const errorMessage =
@@ -331,7 +321,6 @@ export class ExecutionService {
         cwd: options.cwd,
         env: options.env,
         timeoutMs: options.timeoutMs,
-        stdin: options.stdin,
         onOutput: async (chunk) => {
           await startEventSent.promise;
           await options.onEvent({

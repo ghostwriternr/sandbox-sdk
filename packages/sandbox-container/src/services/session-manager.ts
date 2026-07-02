@@ -59,11 +59,7 @@ interface ManagedSession {
     command: string,
     options: RuntimeProcessStreamOptions
   ): AsyncGenerator<ExecEvent, void, unknown>;
-  killCommand(
-    commandId: string,
-    waitForExit?: boolean,
-    signal?: NodeJS.Signals
-  ): Promise<boolean>;
+  killCommand(commandId: string, waitForExit?: boolean): Promise<boolean>;
   getRunningCommandIds(): string[];
   isReady(): boolean;
   wasDestroyed(): boolean;
@@ -294,18 +290,14 @@ class RuntimeBackedSession implements ManagedSession {
     }
   }
 
-  async killCommand(
-    commandId: string,
-    _waitForExit = true,
-    signal: NodeJS.Signals = 'SIGTERM'
-  ): Promise<boolean> {
+  async killCommand(commandId: string, _waitForExit = true): Promise<boolean> {
     const runtimeProcess = this.runtimeProcesses.get(commandId);
     if (!runtimeProcess) {
       return false;
     }
 
     runtimeProcess.controller.abort();
-    await runtimeProcess.process?.kill(signal);
+    await runtimeProcess.process?.kill();
     return true;
   }
 
@@ -1141,8 +1133,7 @@ export class SessionManager {
    */
   async killCommand(
     sessionId: string,
-    commandId: string,
-    signal: NodeJS.Signals = 'SIGTERM'
+    commandId: string
   ): Promise<ServiceResult<void>> {
     try {
       const sessionResult = await this.getSession(sessionId);
@@ -1153,7 +1144,7 @@ export class SessionManager {
 
       const session = sessionResult.data;
 
-      const killed = await session.killCommand(commandId, true, signal);
+      const killed = await session.killCommand(commandId);
 
       if (!killed) {
         return {

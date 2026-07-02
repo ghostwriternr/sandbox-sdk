@@ -1,9 +1,4 @@
-import type {
-  ProcessOptions,
-  ProcessOutputMode,
-  ProcessStatus,
-  ProcessStderrMode
-} from '../core/types';
+import type { ProcessOptions, ProcessStatus } from '../core/types';
 
 export interface CommandValidation {
   valid: boolean;
@@ -20,8 +15,6 @@ export interface ProcessRecordData {
   sessionId?: string;
   stdout: string;
   stderr: string;
-  stdoutMode: ProcessOutputMode;
-  stderrMode: ProcessStderrMode;
   outputListeners: Set<(stream: 'stdout' | 'stderr', data: string) => void>;
   statusListeners: Set<(status: ProcessStatus) => void>;
 }
@@ -59,8 +52,6 @@ export class ProcessManager {
       sessionId: options.sessionId,
       stdout: '',
       stderr: '',
-      stdoutMode: options.stdout ?? 'pipe',
-      stderrMode: options.stderr ?? 'pipe',
       outputListeners: new Set(),
       statusListeners: new Set()
     };

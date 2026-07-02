@@ -26,8 +26,6 @@ const createMockProcess = (
   startTime: new Date('2024-01-01T00:00:00Z'),
   stdout: '',
   stderr: '',
-  stdoutMode: 'pipe',
-  stderrMode: 'pipe',
   outputListeners: new Set(),
   statusListeners: new Set(),
   commandHandle: {

@@ -81,11 +81,13 @@ describe('File Watch Workflow', () => {
       throw new Error(`Watch request failed: ${response.status}`);
     }
 
+    // watch() blocks until the watcher is established, so by the time
+    // the response arrives the filesystem watcher is ready.
+    const actionResult = await actions();
+
     const events: FileWatchSSEEvent[] = [];
     let watchId: string | null = null;
     const signal = AbortSignal.timeout(timeoutMs);
-    let actionResult: T | undefined;
-    let actionsStarted = false;
 
     try {
       for await (const event of parseSSEStream<FileWatchSSEEvent>(
@@ -96,14 +98,6 @@ describe('File Watch Workflow', () => {
 
         if (event.type === 'watching') {
           watchId = event.watchId;
-          // The watch stream is the source of truth for readiness. Start
-          // filesystem actions only after the worker has emitted the
-          // `watching` event, avoiding a race where the response object
-          // exists but inotify hasn't subscribed yet.
-          if (!actionsStarted) {
-            actionsStarted = true;
-            actionResult = await actions();
-          }
         }
 
         if (
@@ -126,11 +120,7 @@ describe('File Watch Workflow', () => {
       }
     }
 
-    if (!actionsStarted) {
-      actionResult = await actions();
-    }
-
-    return { events, watchId, actionResult: actionResult as T };
+    return { events, watchId, actionResult };
   }
 
   /**

@@ -149,20 +149,16 @@ export interface ProcessStartOptions {
   cwd?: string;
   encoding?: string;
   autoCleanup?: boolean;
-  origin?: 'user' | 'internal';
-  stdout?: 'pipe' | 'ignore';
-  stderr?: 'pipe' | 'ignore' | 'combined';
 }
 
 export interface SandboxProcessesAPI {
   startProcess(
     command: string,
-    options?: ProcessStartOptions,
-    stdin?: ReadableStream<Uint8Array>
+    options?: ProcessStartOptions
   ): Promise<ProcessStartResult>;
   listProcesses(): Promise<ProcessListResult>;
   getProcess(id: string): Promise<ProcessInfoResult>;
-  killProcess(id: string, signal?: number): Promise<ProcessKillResult>;
+  killProcess(id: string): Promise<ProcessKillResult>;
   killAllProcesses(): Promise<ProcessCleanupResult>;
   getProcessLogs(id: string): Promise<ProcessLogsResult>;
   streamProcessLogs(id: string): Promise<ReadableStream<Uint8Array>>;
