@@ -10,7 +10,7 @@ import {
 type PromiseWithResolvers<T> = {
   promise: Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
-  reject: (reason?: any) => void;
+  reject: (reason?: unknown) => void;
 };
 
 export type StdioChunk = {
@@ -36,12 +36,6 @@ export type CommandSessionExecOptions = {
   timeoutMs?: number;
 };
 
-export type CommandSessionExecResult = {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-};
-
 export type CommandSessionStartProcessOptions = {
   cwd?: string;
   env?: Record<string, string | undefined>;
@@ -49,8 +43,6 @@ export type CommandSessionStartProcessOptions = {
   signal?: AbortSignal;
   onOutput?: (chunk: StdioChunk) => void;
 };
-
-export type CommandSessionProcessResult = CommandSessionExecResult;
 
 type PendingOperation =
   | {
@@ -76,13 +68,14 @@ type ProcessCompletion = {
   stdoutController?: ReadableStreamDefaultController<Uint8Array>;
   stderrController?: ReadableStreamDefaultController<Uint8Array>;
   exitCode: PromiseWithResolvers<number>;
-  output: StdioChunk[];
   nextSeq: number;
   onOutput?: (chunk: StdioChunk) => void;
   timeout?: ReturnType<typeof setTimeout>;
   abortSignal?: AbortSignal;
   abortListener?: () => void;
 };
+
+const backgroundProcesses = new WeakSet<CommandSessionProcess>();
 
 export class CommandSessionProcess {
   constructor(
@@ -91,8 +84,7 @@ export class CommandSessionProcess {
     readonly stdout: ReadableStream<Uint8Array> | null,
     readonly stderr: ReadableStream<Uint8Array> | null,
     readonly exitCode: Promise<number>,
-    private readonly killFn: (signal?: number) => Promise<void> | void,
-    readonly isBackground?: boolean
+    private readonly killFn: (signal?: number) => Promise<void> | void
   ) {}
 
   async output(): Promise<{
@@ -238,10 +230,9 @@ export class CommandSession implements AsyncDisposable {
     const result = this.operationQueue.then(run, run);
     this.operationQueue = result.then(
       async (val) => {
-        if (val && typeof val === 'object' && 'exitCode' in val) {
-          const proc = val as unknown as CommandSessionProcess;
-          if (!proc.isBackground) {
-            await proc.exitCode.catch(() => {});
+        if (val instanceof CommandSessionProcess) {
+          if (!backgroundProcesses.has(val)) {
+            await val.exitCode.catch(() => {});
           }
         }
       },
@@ -470,6 +461,8 @@ export class CommandSession implements AsyncDisposable {
       });
 
       const exitCodeResolver = Promise.withResolvers<number>();
+      // Guard against unhandled rejection for background processes
+      exitCodeResolver.promise.catch(() => {});
 
       const killFn = async (signal?: number) => {
         const sigName = signal === 9 ? 'SIGKILL' : 'SIGTERM';
@@ -482,16 +475,15 @@ export class CommandSession implements AsyncDisposable {
         stdout,
         stderr,
         exitCodeResolver.promise,
-        killFn,
-        true
+        killFn
       );
+      backgroundProcesses.add(process);
 
       const processCompletion: ProcessCompletion = {
         pid,
         stdoutController,
         stderrController,
         exitCode: exitCodeResolver,
-        output: [],
         nextSeq: 0,
         onOutput: pending.onOutput,
         abortSignal: pending.abortSignal
@@ -540,7 +532,6 @@ export class CommandSession implements AsyncDisposable {
       data,
       seq: process.nextSeq++
     };
-    process.output.push(chunk);
 
     const encoder = new TextEncoder();
     const bytes = encoder.encode(data);
@@ -729,16 +720,6 @@ export class CommandSession implements AsyncDisposable {
 function parseExitCode(exitCode: string): number {
   const parsedExitCode = Number.parseInt(exitCode, 10);
   return Number.isNaN(parsedExitCode) ? 1 : parsedExitCode;
-}
-
-function collectProcessOutput(
-  output: StdioChunk[],
-  stream: StdioChunk['stream']
-): string {
-  return output
-    .filter((chunk) => chunk.stream === stream)
-    .map((chunk) => chunk.data)
-    .join('');
 }
 
 function decodePayload(payload: string): string {

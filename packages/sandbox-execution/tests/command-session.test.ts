@@ -131,4 +131,52 @@ describe('CommandSession', () => {
     expect(resAfter.exitCode).toBe(0);
     expect(resAfter.stdout).toBe('session-alive\n');
   });
+
+  it('fails the session if a stateful string command times out', async () => {
+    await using session = await CommandSession.create();
+    const process = await session.exec('sleep 2', { timeoutMs: 50 });
+    await expect(process.exitCode).rejects.toThrow(
+      'Timed out waiting for command'
+    );
+    expect(session.isReady()).toBe(false);
+  });
+
+  it('marks the session failed if the underlying shell exits', async () => {
+    await using session = await CommandSession.create();
+    const process = await session.exec('exit 42');
+    await expect(process.exitCode).rejects.toThrow(
+      'Command session shell exited with code 42'
+    );
+    expect(session.isReady()).toBe(false);
+    await expect(session.exec('echo test')).rejects.toThrow(
+      'Command session shell exited with code 42'
+    );
+  });
+
+  it('aborts a background process when its abort signal is triggered', async () => {
+    await using session = await CommandSession.create();
+    const controller = new AbortController();
+    const process = await session.startProcess('sleep 10', {
+      signal: controller.signal
+    });
+    controller.abort();
+    const res = await getProcessText(process);
+    expect(res.exitCode).not.toBe(0);
+  });
+
+  it('kills a background process and descendants on timeoutMs', async () => {
+    await using session = await CommandSession.create();
+    const process = await session.startProcess('sleep 10', { timeoutMs: 50 });
+    const res = await getProcessText(process);
+    expect(res.exitCode).not.toBe(0);
+  });
+
+  it('handles invalid per-command cwd and returns non-zero exit code', async () => {
+    await using session = await CommandSession.create();
+    const process = await session.exec('pwd', {
+      cwd: '/nonexistent-directory'
+    });
+    const res = await getProcessText(process);
+    expect(res.exitCode).not.toBe(0);
+  });
 });
