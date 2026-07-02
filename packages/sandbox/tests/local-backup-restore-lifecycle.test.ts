@@ -150,12 +150,12 @@ async function createLocalRestoreSandbox(params?: {
   });
 
   sandbox.client = createMockControlClient();
-  vi.spyOn(sandbox.client.utils, 'createSession').mockResolvedValue({
+  vi.spyOn(sandbox.client.sessions, 'create').mockResolvedValue({
     success: true,
     id: 'backup-session',
     message: 'Created'
   } as never);
-  vi.spyOn(sandbox.client.utils, 'deleteSession').mockResolvedValue({
+  vi.spyOn(sandbox.client.sessions, 'delete').mockResolvedValue({
     success: true,
     sessionId: 'backup-session',
     timestamp: '2026-06-15T12:00:00.000Z'
@@ -222,7 +222,7 @@ describe('local backup restore lifecycle', () => {
       }
     });
     storageMap.delete('currentRuntimeIdentity');
-    vi.spyOn(sandbox.client.utils, 'createSession').mockImplementationOnce(
+    vi.spyOn(sandbox.client.sessions, 'create').mockImplementationOnce(
       async () => {
         order.push('createSession');
         return {

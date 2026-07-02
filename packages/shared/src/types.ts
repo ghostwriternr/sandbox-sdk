@@ -587,6 +587,7 @@ export interface SessionCreateResult {
   name?: string;
   cwd?: string;
   timestamp: string;
+  containerPlacementId?: string | null;
 }
 
 export interface SessionDeleteResult {

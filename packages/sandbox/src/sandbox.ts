@@ -11,7 +11,6 @@ import type {
   BucketProvider,
   CheckChangesOptions,
   CheckChangesResult,
-  CommandExecuteOptions,
   DirectoryBackup,
   ExecOptions,
   ExecResult,
@@ -152,10 +151,6 @@ import {
 } from './tunnels/rpc-target';
 import { SandboxControlCallbackImpl } from './tunnels/sandbox-control-callback';
 import { SDK_VERSION } from './version';
-
-type ExecuteResponse = Awaited<
-  ReturnType<ContainerControlClient['commands']['execute']>
->;
 
 /**
  * Persisted record for a single exposed port. `token` authorizes preview
@@ -1105,8 +1100,25 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       getEnv: () => this.env,
       logger: this.logger,
       getClient: () => this.client,
-      execWithSession: (command, sessionId, options) =>
-        this.executeCommand(command, sessionId, options),
+      execWithSession: async (command, sessionId, options) => {
+        const startTime = Date.now();
+        await this.ensureControlPlaneReady();
+        const proc = await this.client.sessions.exec(
+          sessionId,
+          command,
+          options
+        );
+        const output = await proc.output();
+        return {
+          success: output.exitCode === 0,
+          exitCode: output.exitCode,
+          stdout: new TextDecoder().decode(output.stdout),
+          stderr: new TextDecoder().decode(output.stderr),
+          command,
+          duration: Date.now() - startTime,
+          timestamp: new Date().toISOString()
+        };
+      },
       currentRuntime: this.currentRuntime,
       currentLifetime: this.currentLifetime
     });
@@ -2321,8 +2333,23 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     )`;
 
     const exec = sessionId
-      ? (cmd: string) =>
-          this.executeCommand(cmd, sessionId, { origin: 'internal' })
+      ? async (cmd: string) => {
+          const startTime = Date.now();
+          await this.ensureControlPlaneReady();
+          const proc = await this.client.sessions.exec(sessionId, cmd, {
+            origin: 'internal'
+          });
+          const output = await proc.output();
+          return {
+            success: output.exitCode === 0,
+            exitCode: output.exitCode,
+            stdout: new TextDecoder().decode(output.stdout),
+            stderr: new TextDecoder().decode(output.stderr),
+            command: cmd,
+            duration: Date.now() - startTime,
+            timestamp: new Date().toISOString()
+          };
+        }
       : (cmd: string) => this.execInternal(cmd);
 
     const result = await exec(script);
@@ -3369,34 +3396,6 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     return Object.keys(filteredEnv).length > 0 ? filteredEnv : undefined;
   }
 
-  private buildExecutionRequestOptions(
-    sessionId: string | undefined,
-    options?: {
-      timeout?: number;
-      env?: Record<string, string | undefined>;
-      cwd?: string;
-      origin?: 'user' | 'internal';
-    }
-  ): CommandExecuteOptions | undefined {
-    const env = this.resolveExecutionEnv(sessionId, options?.env);
-
-    if (
-      options?.timeout === undefined &&
-      env === undefined &&
-      options?.cwd === undefined &&
-      options?.origin === undefined
-    ) {
-      return undefined;
-    }
-
-    return {
-      ...(options?.timeout !== undefined && { timeoutMs: options.timeout }),
-      ...(env !== undefined && { env }),
-      ...(options?.cwd !== undefined && { cwd: options.cwd }),
-      ...(options?.origin !== undefined && { origin: options.origin })
-    };
-  }
-
   async exec(
     command: SandboxCommand,
     options: ExecOptions = {}
@@ -3642,79 +3641,17 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
    * tagged with origin: 'internal' so logging demotes it to debug level.
    */
   private async execInternal(command: string): Promise<ExecResult> {
-    return this.executeCommand(command, undefined, {
-      origin: 'internal'
-    });
-  }
-
-  /**
-   * Internal command execution implementation used by public exec() and
-   * explicit session wrappers.
-   */
-  private async executeCommand(
-    command: string,
-    sessionId: string | undefined,
-    options?: ExecOptions
-  ): Promise<ExecResult> {
     const startTime = Date.now();
-    let execOutcome: { exitCode: number; success: boolean } | undefined;
-    let execError: Error | undefined;
-
-    try {
-      const executionOptions = this.buildExecutionRequestOptions(
-        sessionId,
-        options
-      );
-      const commandOptions: CommandExecuteOptions | undefined =
-        sessionId === undefined
-          ? executionOptions
-          : { ...(executionOptions ?? {}), sessionId };
-
-      const response = commandOptions
-        ? await this.client.commands.execute(command, commandOptions)
-        : await this.client.commands.execute(command);
-
-      const duration = Date.now() - startTime;
-      const result = this.mapExecuteResponseToExecResult(
-        response,
-        duration,
-        sessionId
-      );
-
-      execOutcome = { exitCode: result.exitCode, success: result.success };
-      return result;
-    } catch (error) {
-      execError = error instanceof Error ? error : new Error(String(error));
-      throw error;
-    } finally {
-      logCanonicalEvent(this.logger, {
-        event: 'sandbox.exec',
-        outcome: execError ? 'error' : 'success',
-        command,
-        exitCode: execOutcome?.exitCode,
-        durationMs: Date.now() - startTime,
-        sessionId,
-        origin: options?.origin ?? 'user',
-        error: execError ?? undefined,
-        errorMessage: execError?.message
-      });
-    }
-  }
-
-  private mapExecuteResponseToExecResult(
-    response: ExecuteResponse,
-    duration: number,
-    sessionId?: string
-  ): ExecResult {
+    const proc = await this.exec(command, { origin: 'internal' });
+    const output = await proc.output();
     return {
-      success: response.success,
-      exitCode: response.exitCode,
-      stdout: response.stdout,
-      stderr: response.stderr,
-      command: response.command,
-      duration,
-      timestamp: response.timestamp,
-      sessionId
+      success: output.exitCode === 0,
+      exitCode: output.exitCode,
+      stdout: new TextDecoder().decode(output.stdout),
+      stderr: new TextDecoder().decode(output.stderr),
+      command,
+      duration: Date.now() - startTime,
+      timestamp: new Date().toISOString()
     };
   }
 
@@ -4475,7 +4412,8 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       Object.keys(filteredEnv).length > 0 ? filteredEnv : undefined;
 
     // Create session in container
-    const response = await this.client.utils.createSession({
+    await this.ensureControlPlaneReady();
+    const response = await this.client.sessions.create({
       id: sessionId,
       ...(envPayload && { env: envPayload }),
       ...(options?.cwd && { cwd: options.cwd }),
@@ -4514,7 +4452,8 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
    * @returns Result with success status, sessionId, and timestamp
    */
   async deleteSession(sessionId: string): Promise<SessionDeleteResult> {
-    const response = await this.client.utils.deleteSession(sessionId);
+    await this.ensureControlPlaneReady();
+    const response = await this.client.sessions.delete(sessionId);
 
     // Map HTTP response to result type
     return {
@@ -4545,20 +4484,46 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
   }
 
   private getSessionWrapper(sessionId: string): ExecutionSession {
+    const runSessionInternal = async (command: string): Promise<void> => {
+      const proc = await this.client.sessions.exec(sessionId, command, {
+        origin: 'internal'
+      });
+      const output = await proc.output();
+      if (output.exitCode !== 0) {
+        throw new Error(new TextDecoder().decode(output.stderr));
+      }
+    };
+
     return {
       id: sessionId,
 
-      exec: (command, options): Promise<SandboxProcess> => {
-        return Promise.reject(
-          new Error(
-            'Session exec is not implemented yet. Session RPC wiring is scheduled for Task 7.'
-          )
+      exec: async (command: SandboxCommand, options?: ExecOptions) => {
+        await this.ensureControlPlaneReady();
+        const sessionProcess = await this.client.sessions.exec(
+          sessionId,
+          command,
+          options
         );
+
+        return createSandboxProcess({
+          pid: sessionProcess.pid,
+          stdin: sessionProcess.stdin,
+          stdout: sessionProcess.stdout,
+          stderr: sessionProcess.stderr,
+          exitCode: sessionProcess.exitCode,
+          output: () => sessionProcess.output(),
+          kill: (signal) => sessionProcess.kill(signal),
+          waitForPort: (port, waitOptions, processExitCode) =>
+            this.waitForPortForProcess(port, waitOptions, processExitCode)
+        });
       },
 
       // File operations - pass sessionId via options
-      writeFile: (path, content, options) =>
-        this.writeFile(path, content, { ...options, sessionId }),
+      writeFile: (
+        path: string,
+        content: string | ReadableStream<Uint8Array>,
+        options?: { encoding?: FileEncoding }
+      ) => this.writeFile(path, content, { ...options, sessionId }),
       readFile: ((
         path: string,
         options?: { encoding?: FileEncoding; sessionId?: string }
@@ -4569,22 +4534,25 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
         }
         return this.readFile(path, { encoding, sessionId });
       }) as ExecutionSession['readFile'],
-      readFileStream: (path) => this.readFileStream(path, { sessionId }),
-      watch: (path, options) => this.watch(path, { ...options, sessionId }),
-      checkChanges: (path, options) =>
+      readFileStream: (path: string) =>
+        this.readFileStream(path, { sessionId }),
+      watch: (path: string, options?: WatchOptions) =>
+        this.watch(path, { ...options, sessionId }),
+      checkChanges: (path: string, options?: WatchOptions) =>
         this.checkChanges(path, { ...options, sessionId }),
-      mkdir: (path, options) => this.mkdir(path, { ...options, sessionId }),
-      deleteFile: (path) => this.deleteFile(path, { sessionId }),
-      renameFile: (oldPath, newPath) =>
+      mkdir: (path: string, options?: { recursive?: boolean }) =>
+        this.mkdir(path, { ...options, sessionId }),
+      deleteFile: (path: string) => this.deleteFile(path, { sessionId }),
+      renameFile: (oldPath: string, newPath: string) =>
         this.renameFile(oldPath, newPath, { sessionId }),
-      moveFile: (sourcePath, destPath) =>
+      moveFile: (sourcePath: string, destPath: string) =>
         this.moveFile(sourcePath, destPath, { sessionId }),
-      listFiles: (path, options) =>
+      listFiles: (path: string, options?: ListFilesOptions) =>
         this.listFiles(path, { ...options, sessionId }),
-      exists: (path) => this.exists(path, { sessionId }),
+      exists: (path: string) => this.exists(path, { sessionId }),
 
       // Git operations
-      gitCheckout: (repoUrl, options) =>
+      gitCheckout: (repoUrl: string, options?: any) =>
         this.gitCheckout(repoUrl, { ...options, sessionId }),
 
       setEnvVars: async (envVars: Record<string, string | undefined>) => {
@@ -4593,32 +4561,12 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
         try {
           for (const key of toUnset) {
             const unsetCommand = `unset ${key}`;
-
-            const result = await this.client.commands.execute(unsetCommand, {
-              sessionId,
-              origin: 'internal'
-            });
-
-            if (result.exitCode !== 0) {
-              throw new Error(
-                `Failed to unset ${key}: ${result.stderr || 'Unknown error'}`
-              );
-            }
+            await runSessionInternal(unsetCommand);
           }
 
           for (const [key, value] of Object.entries(toSet)) {
             const exportCommand = `export ${key}=${shellEscape(value)}`;
-
-            const result = await this.client.commands.execute(exportCommand, {
-              sessionId,
-              origin: 'internal'
-            });
-
-            if (result.exitCode !== 0) {
-              throw new Error(
-                `Failed to set ${key}: ${result.stderr || 'Unknown error'}`
-              );
-            }
+            await runSessionInternal(exportCommand);
           }
         } catch (error) {
           this.logger.error(
@@ -4631,14 +4579,14 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       },
 
       // Bucket mounting - sandbox-level operations
-      mountBucket: (bucket, mountPath, options) =>
+      mountBucket: (bucket: any, mountPath: string, options?: any) =>
         this.mountBucket(bucket, mountPath, options),
-      unmountBucket: (mountPath) => this.unmountBucket(mountPath),
+      unmountBucket: (mountPath: string) => this.unmountBucket(mountPath),
 
       // Backup operations - sandbox-level, uses R2 binding
-      createBackup: (options) => this.createBackup(options),
+      createBackup: (options: BackupOptions) => this.createBackup(options),
       restoreBackup: (backup: DirectoryBackup) => this.restoreBackup(backup)
-    };
+    } as unknown as ExecutionSession;
   }
 
   // ============================================================================

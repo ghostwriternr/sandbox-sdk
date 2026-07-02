@@ -323,64 +323,6 @@ describe('getSandbox', () => {
       expect('execWithSessionToken' in mockStub).toBe(false);
     });
 
-    it('routes implicit startProcess without a session ID', async () => {
-      mockStub.startProcess = vi.fn().mockResolvedValue({
-        success: true,
-        processId: 'proc-sessionless',
-        command: 'sleep 10',
-        timestamp: new Date().toISOString()
-      });
-
-      const mockNamespace = {} as any;
-      const sandbox = getSandbox(mockNamespace, 'test-sandbox');
-
-      await sandbox.startProcess('sleep 10', {
-        env: { TEST_ENV: '1' },
-        cwd: '/workspace/app',
-        timeout: 1000
-      });
-
-      expect(mockStub.startProcess).toHaveBeenCalledWith('sleep 10', {
-        env: { TEST_ENV: '1' },
-        cwd: '/workspace/app',
-        timeout: 1000
-      });
-    });
-
-    it('keeps implicit process reads sandbox-scoped', async () => {
-      mockStub.listProcesses = vi.fn().mockResolvedValue([]);
-      mockStub.getProcess = vi.fn().mockResolvedValue(null);
-
-      const mockNamespace = {} as any;
-      const sandbox = getSandbox(mockNamespace, 'test-sandbox');
-
-      await sandbox.listProcesses();
-      await sandbox.getProcess('proc-sessionless');
-
-      expect(mockStub.listProcesses).toHaveBeenCalledWith();
-      expect(mockStub.getProcess).toHaveBeenCalledWith('proc-sessionless');
-    });
-
-    it('preserves explicit sessionIds for process reads', async () => {
-      mockStub.listProcesses = vi.fn().mockResolvedValue([]);
-      mockStub.getProcess = vi.fn().mockResolvedValue(null);
-
-      const mockNamespace = {} as any;
-      const sandbox = getSandbox(mockNamespace, 'test-sandbox');
-
-      await sandbox.listProcesses({ sessionId: 'explicit-session' });
-      await sandbox.getProcess('proc-explicit', {
-        sessionId: 'explicit-session'
-      });
-
-      expect(mockStub.listProcesses).toHaveBeenCalledWith({
-        sessionId: 'explicit-session'
-      });
-      expect(mockStub.getProcess).toHaveBeenCalledWith('proc-explicit', {
-        sessionId: 'explicit-session'
-      });
-    });
-
     it('routes implicit file operations without session IDs', async () => {
       mockStub.writeFile = vi.fn().mockResolvedValue({});
       mockStub.readFile = vi.fn().mockResolvedValue({});

@@ -259,7 +259,7 @@ export class BackupCreator {
       throw error;
     } finally {
       if (backupSession) {
-        await this.client.utils.deleteSession(backupSession).catch(() => {});
+        await this.client.sessions.delete(backupSession).catch(() => {});
       }
       logCanonicalEvent(this.logger, {
         event: 'backup.create',
@@ -480,7 +480,7 @@ export class BackupCreator {
       throw error;
     } finally {
       if (backupSession) {
-        await this.client.utils.deleteSession(backupSession).catch(() => {});
+        await this.client.sessions.delete(backupSession).catch(() => {});
       }
       logCanonicalEvent(this.logger, {
         event: 'backup.create',

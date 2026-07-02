@@ -150,28 +150,30 @@ async function createBackupSandbox(params?: {
   });
 
   sandbox.client = createMockControlClient();
-  vi.spyOn(sandbox.client.utils, 'createSession').mockResolvedValue({
+  vi.spyOn(sandbox.client.sessions, 'create').mockResolvedValue({
     success: true,
     id: 'backup-session',
     message: 'Created'
   } as never);
-  vi.spyOn(sandbox.client.utils, 'deleteSession').mockResolvedValue({
+  vi.spyOn(sandbox.client.sessions, 'delete').mockResolvedValue({
     success: true,
     sessionId: 'backup-session',
     timestamp: '2026-06-15T12:00:00.000Z'
   } as never);
-  const sandboxInternals = sandbox as unknown as {
-    executeCommand: () => Promise<{
-      stdout: string;
-      stderr: string;
-      exitCode: number;
-    }>;
-  };
-  vi.spyOn(sandboxInternals, 'executeCommand').mockResolvedValue({
-    stdout: '42',
-    stderr: '',
-    exitCode: 0
-  });
+  vi.spyOn(sandbox.client.sessions, 'exec').mockResolvedValue({
+    pid: 123,
+    stdin: null,
+    stdout: null,
+    stderr: null,
+    exitCode: Promise.resolve(0),
+    output: () =>
+      Promise.resolve({
+        exitCode: 0,
+        stdout: new TextEncoder().encode('42'),
+        stderr: new TextEncoder().encode('')
+      }),
+    kill: () => Promise.resolve()
+  } as any);
   vi.spyOn(sandbox.client.backup, 'restoreArchive').mockResolvedValue({
     success: true,
     dir: '/workspace/project'
@@ -230,7 +232,7 @@ describe('backup restore lifecycle', () => {
       }
     });
     storageMap.delete('currentRuntimeIdentity');
-    vi.spyOn(sandbox.client.utils, 'createSession').mockImplementationOnce(
+    vi.spyOn(sandbox.client.sessions, 'create').mockImplementationOnce(
       async () => {
         order.push('createSession');
         return {

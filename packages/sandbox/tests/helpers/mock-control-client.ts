@@ -24,6 +24,12 @@ export function createMockControlClient(): Sandbox['client'] {
       listFiles: vi.fn(),
       exists: vi.fn()
     },
+    sessions: {
+      create: vi.fn(),
+      delete: vi.fn(),
+      list: vi.fn(),
+      exec: vi.fn()
+    },
     processes: {
       startProcess: vi.fn(),
       listProcesses: vi.fn(),

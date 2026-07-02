@@ -91,7 +91,7 @@ describe('Process Readiness Feature', () => {
     sandbox.client = createMockControlClient();
 
     // Mock session creation
-    vi.spyOn(sandbox.client.utils, 'createSession').mockResolvedValue({
+    vi.spyOn(sandbox.client.sessions, 'create').mockResolvedValue({
       success: true,
       id: 'sandbox-default',
       message: 'Created'

@@ -102,6 +102,7 @@ interface MockCtx {
     running: boolean;
     getTcpPort?: ReturnType<typeof vi.fn>;
     start?: ReturnType<typeof vi.fn>;
+    exec?: ReturnType<typeof vi.fn>;
   };
   id: {
     toString: () => string;
@@ -244,7 +245,26 @@ describe('Sandbox - Automatic Session Management', () => {
           <T>(callback: () => Promise<T>): Promise<T> => callback()
         ),
       waitUntil: vi.fn(),
-      container: { running: true, start: vi.fn() },
+      container: {
+        running: true,
+        start: vi.fn(),
+        exec: vi.fn().mockImplementation(async () => {
+          return {
+            pid: 123,
+            stdin: null,
+            stdout: null,
+            stderr: null,
+            exitCode: Promise.resolve(0),
+            output: () =>
+              Promise.resolve({
+                exitCode: 0,
+                stdout: new TextEncoder().encode(''),
+                stderr: new TextEncoder().encode('')
+              }),
+            kill: () => Promise.resolve()
+          };
+        })
+      },
       id: {
         toString: () => 'test-sandbox-id',
         equals: vi.fn(),
@@ -277,19 +297,10 @@ describe('Sandbox - Automatic Session Management', () => {
     sandbox.client = createMockControlClient();
 
     // Now spy on the client methods that we need for testing
-    vi.spyOn(sandbox.client.utils, 'createSession').mockResolvedValue({
+    vi.spyOn(sandbox.client.sessions, 'create').mockResolvedValue({
       success: true,
       id: 'sandbox-default',
       message: 'Created'
-    } as any);
-
-    vi.spyOn(sandbox.client.commands, 'execute').mockResolvedValue({
-      success: true,
-      stdout: '',
-      stderr: '',
-      exitCode: 0,
-      command: '',
-      timestamp: new Date().toISOString()
     } as any);
 
     vi.spyOn(sandbox.client.files, 'writeFile').mockResolvedValue({
@@ -577,38 +588,45 @@ describe('Sandbox - Automatic Session Management', () => {
 
     it('runs infrastructure exec without creating a default session', async () => {
       await sandbox.setEnvVars({ INFRA_TOKEN: 'secret' });
-      vi.mocked(sandbox.client.utils.createSession).mockClear();
-      vi.mocked(sandbox.client.commands.execute).mockClear();
-      vi.mocked(sandbox.client.commands.execute).mockResolvedValueOnce({
-        success: true,
-        stdout: 'infra',
-        stderr: '',
-        exitCode: 0,
-        command: 'printf infra',
-        timestamp: new Date().toISOString()
-      } as any);
+      vi.mocked(sandbox.client.sessions.create).mockClear();
+
+      const containerExecSpy = vi
+        .spyOn(mockCtx.container, 'exec')
+        .mockResolvedValueOnce({
+          pid: 123,
+          stdin: null,
+          stdout: null,
+          stderr: null,
+          exitCode: Promise.resolve(0),
+          output: () =>
+            Promise.resolve({
+              exitCode: 0,
+              stdout: new TextEncoder().encode('infra'),
+              stderr: new TextEncoder().encode('')
+            }),
+          kill: () => Promise.resolve()
+        } as any);
 
       const result = await (
         sandbox as unknown as SandboxInternalExec
       ).execInternal('printf infra');
 
-      expect(result.sessionId).toBeUndefined();
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
-      expect(sandbox.client.commands.execute).toHaveBeenCalledWith(
-        'printf infra',
-        {
-          env: { INFRA_TOKEN: 'secret' },
-          origin: 'internal'
-        }
+      expect(result.stdout).toBe('infra');
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
+      expect(containerExecSpy).toHaveBeenCalledWith(
+        ['/bin/bash', '-lc', 'printf infra'],
+        expect.objectContaining({
+          env: expect.objectContaining({ INFRA_TOKEN: 'secret' })
+        })
       );
     });
 
     it('runs direct file operations without creating a default session', async () => {
-      vi.mocked(sandbox.client.utils.createSession).mockClear();
+      vi.mocked(sandbox.client.sessions.create).mockClear();
 
       await sandbox.writeFile('/test.txt', 'content');
 
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
       expect(sandbox.client.files.writeFile).toHaveBeenCalledWith(
         '/test.txt',
         'content',
@@ -622,7 +640,7 @@ describe('Sandbox - Automatic Session Management', () => {
         recursive: false
       });
 
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
       expect(sandbox.client.watch.checkChanges).toHaveBeenCalledWith({
         path: '/workspace/test',
         recursive: false,
@@ -641,7 +659,7 @@ describe('Sandbox - Automatic Session Management', () => {
         count: 0,
         timestamp: new Date().toISOString()
       });
-      vi.mocked(sandbox.client.utils.createSession).mockClear();
+      vi.mocked(sandbox.client.sessions.create).mockClear();
 
       await sandbox.listFiles('/workspace', {
         includeHidden: true,
@@ -656,7 +674,7 @@ describe('Sandbox - Automatic Session Management', () => {
         }
       );
 
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
     });
 
     it('allows explicit session IDs through typed ISandbox APIs', async () => {
@@ -711,17 +729,17 @@ describe('Sandbox - Automatic Session Management', () => {
     it('does not update legacy default shell state from setEnvVars', async () => {
       (sandbox as unknown as { defaultSession: string }).defaultSession =
         'sandbox-default';
-      vi.mocked(sandbox.client.commands.execute).mockClear();
+      vi.mocked(mockCtx.container.exec!).mockClear();
 
       await sandbox.setEnvVars({ INFRA_TOKEN: 'secret' });
 
-      expect(sandbox.client.commands.execute).not.toHaveBeenCalled();
+      expect(mockCtx.container.exec).not.toHaveBeenCalled();
     });
   });
 
   describe('explicit session creation', () => {
     it('should create isolated execution session', async () => {
-      vi.mocked(sandbox.client.utils.createSession).mockResolvedValueOnce({
+      vi.mocked(sandbox.client.sessions.create).mockResolvedValueOnce({
         success: true,
         id: 'custom-session-123',
         message: 'Created'
@@ -733,7 +751,7 @@ describe('Sandbox - Automatic Session Management', () => {
         cwd: '/test'
       });
 
-      expect(sandbox.client.utils.createSession).toHaveBeenCalledWith({
+      expect(sandbox.client.sessions.create).toHaveBeenCalledWith({
         id: 'custom-session-123',
         env: { NODE_ENV: 'test' },
         cwd: '/test'
@@ -746,7 +764,7 @@ describe('Sandbox - Automatic Session Management', () => {
     });
 
     it('should execute operations in specific session context', async () => {
-      vi.mocked(sandbox.client.utils.createSession).mockResolvedValueOnce({
+      vi.mocked(sandbox.client.sessions.create).mockResolvedValueOnce({
         success: true,
         id: 'isolated-session',
         message: 'Created'
@@ -754,13 +772,67 @@ describe('Sandbox - Automatic Session Management', () => {
 
       const session = await sandbox.createSession({ id: 'isolated-session' });
 
-      await expect(session.exec('echo test')).rejects.toThrow(
-        'Session exec is not implemented yet. Session RPC wiring is scheduled for Task 7.'
+      vi.mocked(sandbox.client.sessions.exec).mockResolvedValueOnce({
+        pid: 456,
+        stdin: null,
+        stdout: null,
+        stderr: null,
+        exitCode: Promise.resolve(0),
+        output: () =>
+          Promise.resolve({
+            exitCode: 0,
+            stdout: new TextEncoder().encode('test response'),
+            stderr: new TextEncoder().encode('')
+          }),
+        kill: () => Promise.resolve()
+      } as any);
+
+      const proc = await session.exec('echo test');
+      const output = await proc.output();
+
+      expect(sandbox.client.sessions.exec).toHaveBeenCalledWith(
+        'isolated-session',
+        'echo test',
+        undefined
       );
+      expect(output.exitCode).toBe(0);
+      expect(new TextDecoder().decode(output.stdout)).toBe('test response');
+      expect(proc.waitForPort).toBeTypeOf('function');
+    });
+
+    it('session.exec returns a SandboxProcess handle', async () => {
+      vi.mocked(sandbox.client.sessions.create).mockResolvedValueOnce({
+        success: true,
+        id: 's1',
+        message: 'Created'
+      } as any);
+
+      const session = await sandbox.createSession({ id: 's1' });
+
+      vi.mocked(sandbox.client.sessions.exec).mockResolvedValueOnce({
+        pid: 789,
+        stdin: null,
+        stdout: null,
+        stderr: null,
+        exitCode: Promise.resolve(0),
+        output: () =>
+          Promise.resolve({
+            exitCode: 0,
+            stdout: new TextEncoder().encode(''),
+            stderr: new TextEncoder().encode('')
+          }),
+        kill: () => Promise.resolve()
+      } as any);
+
+      const proc = await session.exec('pwd');
+      const output = await proc.output();
+
+      expect(output.exitCode).toBe(0);
+      expect(proc.waitForPort).toBeTypeOf('function');
     });
 
     it('should isolate multiple explicit sessions', async () => {
-      vi.mocked(sandbox.client.utils.createSession)
+      vi.mocked(sandbox.client.sessions.create)
         .mockResolvedValueOnce({
           success: true,
           id: 'session-1',
@@ -775,16 +847,47 @@ describe('Sandbox - Automatic Session Management', () => {
       const session1 = await sandbox.createSession({ id: 'session-1' });
       const session2 = await sandbox.createSession({ id: 'session-2' });
 
-      await expect(session1.exec('echo build')).rejects.toThrow(
-        'Session exec is not implemented yet. Session RPC wiring is scheduled for Task 7.'
-      );
-      await expect(session2.exec('echo test')).rejects.toThrow(
-        'Session exec is not implemented yet. Session RPC wiring is scheduled for Task 7.'
-      );
+      vi.mocked(sandbox.client.sessions.exec)
+        .mockResolvedValueOnce({
+          pid: 101,
+          stdin: null,
+          stdout: null,
+          stderr: null,
+          exitCode: Promise.resolve(0),
+          output: () =>
+            Promise.resolve({
+              exitCode: 0,
+              stdout: new TextEncoder().encode('build ok'),
+              stderr: new TextEncoder().encode('')
+            }),
+          kill: () => Promise.resolve()
+        } as any)
+        .mockResolvedValueOnce({
+          pid: 102,
+          stdin: null,
+          stdout: null,
+          stderr: null,
+          exitCode: Promise.resolve(0),
+          output: () =>
+            Promise.resolve({
+              exitCode: 0,
+              stdout: new TextEncoder().encode('test ok'),
+              stderr: new TextEncoder().encode('')
+            }),
+          kill: () => Promise.resolve()
+        } as any);
+
+      const proc1 = await session1.exec('echo build');
+      const out1 = await proc1.output();
+      expect(new TextDecoder().decode(out1.stdout)).toBe('build ok');
+
+      const proc2 = await session2.exec('echo test');
+      const out2 = await proc2.output();
+      expect(new TextDecoder().decode(out2.stdout)).toBe('test ok');
     });
 
     it('keeps explicit sessions separate', async () => {
-      vi.mocked(sandbox.client.utils.createSession).mockResolvedValueOnce({
+      vi.mocked(sandbox.client.sessions.create).mockResolvedValueOnce({
         success: true,
         id: 'explicit-session',
         message: 'Created'
@@ -793,13 +896,29 @@ describe('Sandbox - Automatic Session Management', () => {
       const explicitSession = await sandbox.createSession({
         id: 'explicit-session'
       });
-      await expect(explicitSession.exec('echo explicit')).rejects.toThrow(
-        'Session exec is not implemented yet. Session RPC wiring is scheduled for Task 7.'
-      );
+
+      vi.mocked(sandbox.client.sessions.exec).mockResolvedValueOnce({
+        pid: 103,
+        stdin: null,
+        stdout: null,
+        stderr: null,
+        exitCode: Promise.resolve(0),
+        output: () =>
+          Promise.resolve({
+            exitCode: 0,
+            stdout: new TextEncoder().encode('explicit ok'),
+            stderr: new TextEncoder().encode('')
+          }),
+        kill: () => Promise.resolve()
+      } as any);
+
+      const proc = await explicitSession.exec('echo explicit');
+      const out = await proc.output();
+      expect(new TextDecoder().decode(out.stdout)).toBe('explicit ok');
     });
 
     it('should generate session ID if not provided', async () => {
-      vi.mocked(sandbox.client.utils.createSession).mockResolvedValueOnce({
+      vi.mocked(sandbox.client.sessions.create).mockResolvedValueOnce({
         success: true,
         id: 'session-generated-123',
         message: 'Created'
@@ -807,7 +926,7 @@ describe('Sandbox - Automatic Session Management', () => {
 
       await sandbox.createSession();
 
-      expect(sandbox.client.utils.createSession).toHaveBeenCalledWith(
+      expect(sandbox.client.sessions.create).toHaveBeenCalledWith(
         expect.objectContaining({
           id: expect.stringMatching(/^session-/)
         })
@@ -820,7 +939,7 @@ describe('Sandbox - Automatic Session Management', () => {
         commandTimeoutMs: 12_345
       });
 
-      expect(sandbox.client.utils.createSession).toHaveBeenCalledWith(
+      expect(sandbox.client.sessions.create).toHaveBeenCalledWith(
         expect.objectContaining({
           id: 'timeout-session',
           commandTimeoutMs: 12_345
@@ -831,7 +950,7 @@ describe('Sandbox - Automatic Session Management', () => {
 
   describe('placement id capture', () => {
     it('should store containerPlacementId from session-create response', async () => {
-      vi.mocked(sandbox.client.utils.createSession).mockResolvedValueOnce({
+      vi.mocked(sandbox.client.sessions.create).mockResolvedValueOnce({
         success: true,
         id: 'explicit-session',
         message: 'Created',
@@ -847,7 +966,7 @@ describe('Sandbox - Automatic Session Management', () => {
     });
 
     it('should store null when container reports containerPlacementId as null', async () => {
-      vi.mocked(sandbox.client.utils.createSession).mockResolvedValueOnce({
+      vi.mocked(sandbox.client.sessions.create).mockResolvedValueOnce({
         success: true,
         id: 'explicit-session',
         message: 'Created',
@@ -863,7 +982,7 @@ describe('Sandbox - Automatic Session Management', () => {
     });
 
     it('should not touch containerPlacementId storage when response omits the field', async () => {
-      vi.mocked(sandbox.client.utils.createSession).mockResolvedValueOnce({
+      vi.mocked(sandbox.client.sessions.create).mockResolvedValueOnce({
         success: true,
         id: 'explicit-session',
         message: 'Created'
@@ -899,7 +1018,7 @@ describe('Sandbox - Automatic Session Management', () => {
     let session: any;
 
     beforeEach(async () => {
-      vi.mocked(sandbox.client.utils.createSession).mockResolvedValueOnce({
+      vi.mocked(sandbox.client.sessions.create).mockResolvedValueOnce({
         success: true,
         id: 'test-session',
         message: 'Created'
@@ -909,8 +1028,28 @@ describe('Sandbox - Automatic Session Management', () => {
     });
 
     it('should execute command with session context', async () => {
-      await expect(session.exec('pwd')).rejects.toThrow(
-        'Session exec is not implemented yet. Session RPC wiring is scheduled for Task 7.'
+      vi.mocked(sandbox.client.sessions.exec).mockResolvedValueOnce({
+        pid: 111,
+        stdin: null,
+        stdout: null,
+        stderr: null,
+        exitCode: Promise.resolve(0),
+        output: () =>
+          Promise.resolve({
+            exitCode: 0,
+            stdout: new TextEncoder().encode('/home'),
+            stderr: new TextEncoder().encode('')
+          }),
+        kill: () => Promise.resolve()
+      } as any);
+
+      const proc = await session.exec('pwd');
+      const out = await proc.output();
+      expect(new TextDecoder().decode(out.stdout)).toBe('/home');
+      expect(sandbox.client.sessions.exec).toHaveBeenCalledWith(
+        'test-session',
+        'pwd',
+        undefined
       );
     });
 
@@ -960,7 +1099,7 @@ describe('Sandbox - Automatic Session Management', () => {
 
   describe('edge cases and error handling', () => {
     it('should handle explicit session creation errors gracefully', async () => {
-      vi.mocked(sandbox.client.utils.createSession).mockRejectedValueOnce(
+      vi.mocked(sandbox.client.sessions.create).mockRejectedValueOnce(
         new Error('Session creation failed')
       );
 
@@ -972,7 +1111,7 @@ describe('Sandbox - Automatic Session Management', () => {
     it('should not create sessions for implicit file operations when environment is empty', async () => {
       await sandbox.writeFile('/test.txt', 'content');
 
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
       expect(sandbox.client.files.writeFile).toHaveBeenCalledWith(
         '/test.txt',
         'content',
@@ -985,7 +1124,7 @@ describe('Sandbox - Automatic Session Management', () => {
 
       await sandbox.createSession({ id: 'env-session' });
 
-      expect(sandbox.client.utils.createSession).toHaveBeenCalledWith({
+      expect(sandbox.client.sessions.create).toHaveBeenCalledWith({
         id: 'env-session',
         env: { NODE_ENV: 'production', DEBUG: 'true' }
       });
@@ -1040,7 +1179,7 @@ describe('Sandbox - Automatic Session Management', () => {
       });
 
       expect(result.url).toContain('localhost');
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
     });
   });
 
@@ -1434,7 +1573,7 @@ describe('Sandbox - Automatic Session Management', () => {
 
   describe('deleteSession', () => {
     it('does not create a protected default session through implicit file operations', async () => {
-      vi.spyOn(sandbox.client.utils, 'deleteSession').mockResolvedValue({
+      vi.spyOn(sandbox.client.sessions, 'delete').mockResolvedValue({
         success: true,
         sessionId: 'sandbox-default',
         timestamp: new Date().toISOString()
@@ -1444,14 +1583,14 @@ describe('Sandbox - Automatic Session Management', () => {
       const result = await sandbox.deleteSession('sandbox-default');
 
       expect(result.success).toBe(true);
-      expect(sandbox.client.utils.deleteSession).toHaveBeenCalledWith(
+      expect(sandbox.client.sessions.delete).toHaveBeenCalledWith(
         'sandbox-default'
       );
     });
 
     it('should allow deletion of explicit sessions', async () => {
       // Mock the deleteSession API response
-      vi.spyOn(sandbox.client.utils, 'deleteSession').mockResolvedValue({
+      vi.spyOn(sandbox.client.sessions, 'delete').mockResolvedValue({
         success: true,
         sessionId: 'custom-session',
         timestamp: new Date().toISOString()
@@ -1638,7 +1777,7 @@ describe('Sandbox - Automatic Session Management', () => {
           id: expect.any(String)
         })
       );
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
     });
 
     it('onStop() preserves durable auth and clears runtime-scoped preview state', async () => {
@@ -1719,7 +1858,7 @@ describe('Sandbox - Automatic Session Management', () => {
         name: 'my-api'
       });
 
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
       expect(putSpy).toHaveBeenCalledWith('portTokens', {
         '8080': { token: 'friendlytok', name: 'my-api' }
       });
@@ -2171,7 +2310,7 @@ describe('Sandbox - Automatic Session Management', () => {
           status: 'active'
         }
       ]);
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
     });
 
     it('returns an empty list when durable auth exists without a current runtime', async () => {
@@ -2191,7 +2330,7 @@ describe('Sandbox - Automatic Session Management', () => {
       });
 
       await expect(sandbox.getExposedPorts('example.com')).resolves.toEqual([]);
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
     });
 
     it('omits durable auth without matching current-runtime activation', async () => {
@@ -2209,7 +2348,7 @@ describe('Sandbox - Automatic Session Management', () => {
       });
 
       await expect(sandbox.getExposedPorts('example.com')).resolves.toEqual([]);
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
     });
   });
 
@@ -2236,7 +2375,7 @@ describe('Sandbox - Automatic Session Management', () => {
       });
 
       await expect(sandbox.isPortExposed(8080)).resolves.toBe(true);
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
     });
 
     it('returns false for durable auth without activation', async () => {
@@ -2254,7 +2393,7 @@ describe('Sandbox - Automatic Session Management', () => {
       });
 
       await expect(sandbox.isPortExposed(8080)).resolves.toBe(false);
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
     });
 
     it('returns false for activation from an old runtime', async () => {
@@ -2277,7 +2416,7 @@ describe('Sandbox - Automatic Session Management', () => {
       });
 
       await expect(sandbox.isPortExposed(8080)).resolves.toBe(false);
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
     });
   });
 
@@ -2304,7 +2443,7 @@ describe('Sandbox - Automatic Session Management', () => {
 
       expect(mockCtx.storage.put).toHaveBeenCalledWith('portTokens', {});
       expect(mockCtx.storage.delete).toHaveBeenCalledWith('activePreviewPorts');
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
     });
 
     it('revokes auth and activation without touching the container registry when runtime is active', async () => {
@@ -2330,7 +2469,7 @@ describe('Sandbox - Automatic Session Management', () => {
 
       expect(mockCtx.storage.put).toHaveBeenCalledWith('portTokens', {});
       expect(mockCtx.storage.delete).toHaveBeenCalledWith('activePreviewPorts');
-      expect(sandbox.client.utils.createSession).not.toHaveBeenCalled();
+      expect(sandbox.client.sessions.create).not.toHaveBeenCalled();
     });
   });
 
@@ -2716,12 +2855,12 @@ describe('Sandbox - Automatic Session Management', () => {
     it('should allow creating a backup from /app', async () => {
       const { backupSandbox, bucket } = await createBackupSandbox();
 
-      vi.spyOn(backupSandbox.client.utils, 'createSession').mockResolvedValue({
+      vi.spyOn(backupSandbox.client.sessions, 'create').mockResolvedValue({
         success: true,
         id: 'backup-session',
         message: 'Created'
       } as any);
-      vi.spyOn(backupSandbox.client.utils, 'deleteSession').mockResolvedValue({
+      vi.spyOn(backupSandbox.client.sessions, 'delete').mockResolvedValue({
         success: true,
         id: 'backup-session',
         message: 'Deleted'
@@ -2737,11 +2876,20 @@ describe('Sandbox - Automatic Session Management', () => {
         (backupSandbox as any).backupService.transfer,
         'uploadBackupPresigned'
       ).mockResolvedValue(undefined);
-      vi.spyOn(backupSandbox as any, 'executeCommand').mockResolvedValue({
-        stdout: '',
-        stderr: '',
-        exitCode: 0
-      });
+      vi.spyOn(backupSandbox.client.sessions, 'exec').mockResolvedValue({
+        pid: 123,
+        stdin: null,
+        stdout: null,
+        stderr: null,
+        exitCode: Promise.resolve(0),
+        output: () =>
+          Promise.resolve({
+            exitCode: 0,
+            stdout: new TextEncoder().encode(''),
+            stderr: new TextEncoder().encode('')
+          }),
+        kill: () => Promise.resolve()
+      } as any);
 
       const backup = await backupSandbox.createBackup({ dir: '/app/project' });
 
@@ -2765,12 +2913,12 @@ describe('Sandbox - Automatic Session Management', () => {
     it('should normalize globstar excludes before calling createArchive', async () => {
       const { backupSandbox } = await createBackupSandbox();
 
-      vi.spyOn(backupSandbox.client.utils, 'createSession').mockResolvedValue({
+      vi.spyOn(backupSandbox.client.sessions, 'create').mockResolvedValue({
         success: true,
         id: 'backup-session',
         message: 'Created'
       } as any);
-      vi.spyOn(backupSandbox.client.utils, 'deleteSession').mockResolvedValue({
+      vi.spyOn(backupSandbox.client.sessions, 'delete').mockResolvedValue({
         success: true,
         id: 'backup-session',
         message: 'Deleted'
@@ -2786,11 +2934,20 @@ describe('Sandbox - Automatic Session Management', () => {
         (backupSandbox as any).backupService.transfer,
         'uploadBackupPresigned'
       ).mockResolvedValue(undefined);
-      vi.spyOn(backupSandbox as any, 'executeCommand').mockResolvedValue({
-        stdout: '',
-        stderr: '',
-        exitCode: 0
-      });
+      vi.spyOn(backupSandbox.client.sessions, 'exec').mockResolvedValue({
+        pid: 123,
+        stdin: null,
+        stdout: null,
+        stderr: null,
+        exitCode: Promise.resolve(0),
+        output: () =>
+          Promise.resolve({
+            exitCode: 0,
+            stdout: new TextEncoder().encode(''),
+            stderr: new TextEncoder().encode('')
+          }),
+        kill: () => Promise.resolve()
+      } as any);
 
       await backupSandbox.createBackup({
         dir: '/app/project',
@@ -2867,12 +3024,12 @@ describe('Sandbox - Automatic Session Management', () => {
       });
       bucket.head.mockResolvedValue({ size: 42 });
 
-      vi.spyOn(backupSandbox.client.utils, 'createSession').mockResolvedValue({
+      vi.spyOn(backupSandbox.client.sessions, 'create').mockResolvedValue({
         success: true,
         id: 'backup-session',
         message: 'Created'
       } as any);
-      vi.spyOn(backupSandbox.client.utils, 'deleteSession').mockResolvedValue({
+      vi.spyOn(backupSandbox.client.sessions, 'delete').mockResolvedValue({
         success: true,
         id: 'backup-session',
         message: 'Deleted'
@@ -2886,11 +3043,20 @@ describe('Sandbox - Automatic Session Management', () => {
           'downloadBackupParallel'
         )
         .mockResolvedValue(undefined);
-      vi.spyOn(backupSandbox as any, 'executeCommand').mockResolvedValue({
-        stdout: '0',
-        stderr: '',
-        exitCode: 0
-      });
+      vi.spyOn(backupSandbox.client.sessions, 'exec').mockResolvedValue({
+        pid: 123,
+        stdin: null,
+        stdout: null,
+        stderr: null,
+        exitCode: Promise.resolve(0),
+        output: () =>
+          Promise.resolve({
+            exitCode: 0,
+            stdout: new TextEncoder().encode('0'),
+            stderr: new TextEncoder().encode('')
+          }),
+        kill: () => Promise.resolve()
+      } as any);
 
       const result = await backupSandbox.restoreBackup({
         id: backupId,
@@ -2921,15 +3087,63 @@ describe('Sandbox - Automatic Session Management', () => {
       const { backupSandbox } = await createBackupSandbox();
       const expectedSize = 16 * 1024 * 1024;
       const executeCommandSpy = vi
-        .spyOn(backupSandbox as any, 'executeCommand')
-        .mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 })
-        .mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 })
+        .spyOn(backupSandbox.client.sessions, 'exec')
         .mockResolvedValueOnce({
-          stdout: String(expectedSize),
-          stderr: '',
-          exitCode: 0
-        })
-        .mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 });
+          pid: 123,
+          stdin: null,
+          stdout: null,
+          stderr: null,
+          exitCode: Promise.resolve(0),
+          output: () =>
+            Promise.resolve({
+              exitCode: 0,
+              stdout: new TextEncoder().encode(''),
+              stderr: new TextEncoder().encode('')
+            }),
+          kill: () => Promise.resolve()
+        } as any)
+        .mockResolvedValueOnce({
+          pid: 123,
+          stdin: null,
+          stdout: null,
+          stderr: null,
+          exitCode: Promise.resolve(0),
+          output: () =>
+            Promise.resolve({
+              exitCode: 0,
+              stdout: new TextEncoder().encode(''),
+              stderr: new TextEncoder().encode('')
+            }),
+          kill: () => Promise.resolve()
+        } as any)
+        .mockResolvedValueOnce({
+          pid: 123,
+          stdin: null,
+          stdout: null,
+          stderr: null,
+          exitCode: Promise.resolve(0),
+          output: () =>
+            Promise.resolve({
+              exitCode: 0,
+              stdout: new TextEncoder().encode(String(expectedSize)),
+              stderr: new TextEncoder().encode('')
+            }),
+          kill: () => Promise.resolve()
+        } as any)
+        .mockResolvedValueOnce({
+          pid: 123,
+          stdin: null,
+          stdout: null,
+          stderr: null,
+          exitCode: Promise.resolve(0),
+          output: () =>
+            Promise.resolve({
+              exitCode: 0,
+              stdout: new TextEncoder().encode(''),
+              stderr: new TextEncoder().encode('')
+            }),
+          kill: () => Promise.resolve()
+        } as any);
       vi.spyOn(
         (backupSandbox as any).backupService.transfer,
         'generatePresignedGetURL'
@@ -2946,7 +3160,7 @@ describe('Sandbox - Automatic Session Management', () => {
         'backup-session'
       );
 
-      const downloadCommand = executeCommandSpy.mock.calls[1][0] as string;
+      const downloadCommand = executeCommandSpy.mock.calls[1][1] as string;
       expect(downloadCommand).toContain(
         "truncate -s 16777216 '/var/backups/test.sqsh.tmp'"
       );
@@ -3080,22 +3294,28 @@ describe('Sandbox - Automatic Session Management', () => {
       stdout?: string;
       stderr?: string;
     }) {
-      vi.mocked(sandbox.client.commands.execute).mockImplementation(
-        async (command: string) => {
-          const base = {
-            success: true,
-            command,
-            timestamp: new Date().toISOString()
-          };
-          if (command.includes('s3fs ') && command.includes('mountpoint -q')) {
-            return {
-              ...base,
-              stdout: '',
-              stderr: '',
-              ...result
-            } as any;
-          }
-          return { ...base, exitCode: 0, stdout: '', stderr: '' } as any;
+      vi.mocked(mockCtx.container.exec!).mockImplementation(
+        async (argv: string[]) => {
+          const command = argv.join(' ');
+          const isMountScript =
+            command.includes('s3fs ') && command.includes('mountpoint -q');
+          const exitCode = isMountScript ? result.exitCode : 0;
+          const stdout = isMountScript ? (result.stdout ?? '') : '';
+          const stderr = isMountScript ? (result.stderr ?? '') : '';
+          return {
+            pid: 123,
+            stdin: null,
+            stdout: null,
+            stderr: null,
+            exitCode: Promise.resolve(exitCode),
+            output: () =>
+              Promise.resolve({
+                exitCode,
+                stdout: new TextEncoder().encode(stdout),
+                stderr: new TextEncoder().encode(stderr)
+              }),
+            kill: () => Promise.resolve()
+          } as any;
         }
       );
     }
@@ -3138,23 +3358,28 @@ describe('Sandbox - Automatic Session Management', () => {
       // the last poll and our cleanup. The failure path must unmount that
       // mount instead of leaking it.
       const issuedCommands: string[] = [];
-      vi.mocked(sandbox.client.commands.execute).mockImplementation(
-        async (command: string) => {
+      vi.mocked(mockCtx.container.exec!).mockImplementation(
+        async (argv: string[]) => {
+          const command = argv.join(' ');
           issuedCommands.push(command);
-          const base = {
-            success: true,
-            command,
-            timestamp: new Date().toISOString()
-          };
-          if (command.includes('s3fs ') && command.includes('mountpoint -q')) {
-            return {
-              ...base,
-              exitCode: 3,
-              stdout: 'mount took too long',
-              stderr: ''
-            } as any;
-          }
-          return { ...base, exitCode: 0, stdout: '', stderr: '' } as any;
+          const isMountScript =
+            command.includes('s3fs ') && command.includes('mountpoint -q');
+          const exitCode = isMountScript ? 3 : 0;
+          const stdout = isMountScript ? 'mount took too long' : '';
+          return {
+            pid: 123,
+            stdin: null,
+            stdout: null,
+            stderr: null,
+            exitCode: Promise.resolve(exitCode),
+            output: () =>
+              Promise.resolve({
+                exitCode,
+                stdout: new TextEncoder().encode(stdout),
+                stderr: new TextEncoder().encode('')
+              }),
+            kill: () => Promise.resolve()
+          } as any;
         }
       );
 

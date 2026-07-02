@@ -118,11 +118,11 @@ export class BackupService {
    * Create a unique, dedicated session for a single backup operation.
    * Each call produces a fresh session ID so concurrent or sequential
    * operations never share shell state. Callers must destroy the session
-   * in a finally block via `client.utils.deleteSession()`.
+   * in a finally block via `client.sessions.delete()`.
    */
   private async ensureBackupSession(): Promise<string> {
     const sessionId = `__sandbox_backup_${crypto.randomUUID()}`;
-    await this.client.utils.createSession({ id: sessionId, cwd: '/' });
+    await this.client.sessions.create({ id: sessionId, cwd: '/' });
     return sessionId;
   }
 
@@ -387,7 +387,7 @@ export class BackupService {
       throw error;
     } finally {
       if (backupSession) {
-        await this.client.utils.deleteSession(backupSession).catch(() => {});
+        await this.client.sessions.delete(backupSession).catch(() => {});
       }
       logCanonicalEvent(this.logger, {
         event: 'backup.restore',
@@ -575,7 +575,7 @@ export class BackupService {
       throw error;
     } finally {
       if (backupSession) {
-        await this.client.utils.deleteSession(backupSession).catch(() => {});
+        await this.client.sessions.delete(backupSession).catch(() => {});
       }
       logCanonicalEvent(this.logger, {
         event: 'backup.restore',

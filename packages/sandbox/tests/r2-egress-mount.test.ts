@@ -893,7 +893,7 @@ describe('Sandbox R2 egress mounts', () => {
     const client = createMockControlClient();
     sandbox.client = client;
 
-    vi.mocked(client.utils.createSession).mockResolvedValue({
+    vi.mocked(client.sessions.create).mockResolvedValue({
       success: true,
       id: 'sandbox-default',
       message: 'Created',
@@ -912,7 +912,7 @@ describe('Sandbox R2 egress mounts', () => {
     });
     await sandbox.unmountBucket('/mnt/local');
 
-    expect(client.utils.createSession).not.toHaveBeenCalled();
+    expect(client.sessions.create).not.toHaveBeenCalled();
     expect(client.files.mkdir).toHaveBeenCalledWith('/mnt/local', {
       recursive: true
     });

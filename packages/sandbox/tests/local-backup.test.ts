@@ -185,13 +185,13 @@ describe('Local Backup & Restore', () => {
     sandbox.client = createMockControlClient();
 
     // Mock session creation
-    vi.spyOn(sandbox.client.utils, 'createSession').mockResolvedValue({
+    vi.spyOn(sandbox.client.sessions, 'create').mockResolvedValue({
       success: true,
       id: 'sandbox-default',
       message: 'Created'
     } as any);
 
-    vi.spyOn(sandbox.client.utils, 'deleteSession').mockResolvedValue({
+    vi.spyOn(sandbox.client.sessions, 'delete').mockResolvedValue({
       success: true,
       sessionId: 'sandbox-default',
       timestamp: new Date().toISOString()
@@ -335,7 +335,7 @@ describe('Local Backup & Restore', () => {
       ).rejects.toThrow('Container failed to create backup archive');
 
       // Verify session was cleaned up
-      expect(sandbox.client.utils.deleteSession).toHaveBeenCalled();
+      expect(sandbox.client.sessions.delete).toHaveBeenCalled();
     });
 
     it('should not require presigned URL credentials', async () => {
