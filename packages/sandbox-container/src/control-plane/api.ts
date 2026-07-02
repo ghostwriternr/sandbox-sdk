@@ -25,7 +25,6 @@ import type {
   SessionDeleteResult,
   SessionExecStartResult,
   SessionListResult,
-  SessionOptions,
   StopTunnelRunRequest,
   StopTunnelRunResult,
   TunnelInfo,
@@ -177,7 +176,7 @@ class SessionsRPCAPI extends RpcTarget {
   }
 
   async create(
-    options: SessionCreateOptions = {} as any
+    options: SessionCreateOptions = { id: '' }
   ): Promise<SessionCreateResult> {
     const sessionOpts = {
       ...options,
@@ -217,9 +216,9 @@ class SessionsRPCAPI extends RpcTarget {
   }
 
   async exec(
-    sessionId: string,
-    command: SandboxCommand,
-    options: ExecOptions = {}
+    _sessionId: string,
+    _command: SandboxCommand,
+    _options: ExecOptions = {}
   ): Promise<SessionExecStartResult> {
     throw new Error('exec in SessionService is not implemented yet');
   }
