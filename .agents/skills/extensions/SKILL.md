@@ -15,7 +15,7 @@ There is exactly **one** way to build one: subclass **`SandboxExtension`** from
 invent new patterns. Two flavors share that single base:
 
 - **SDK-only** — orchestrates existing container control sub-APIs
-  (`commands`, `files`, `git`, `processes`, `interpreter`, …). No sidecar.
+  (`sessions`, `files`, `git`, `ports`, `terminals`, …). No sidecar.
 - **Sidecar** — ships an npm-style tarball that the container provisions and
   spawns. The sidecar speaks capnweb back over a unix socket; the SDK
   obtains a typed remote stub via `this.sidecar<T>()`.

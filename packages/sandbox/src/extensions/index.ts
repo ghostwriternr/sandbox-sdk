@@ -6,7 +6,7 @@
  * {@link SandboxExtension}, captured lazily via a `withX(this)` factory.
  *
  * - No sidecar? Extend {@link SandboxExtension} and use `this.client.<subApi>`
- *   (`commands`, `files`, `git`, `interpreter`, \u2026). Don't pass a package.
+ *   (`sessions`, `files`, `git`, `ports`, \u2026). Don't pass a package.
  * - Need a container sidecar? Pass an {@link ExtensionPackage} to `super()`.
  *   Then call {@link SandboxExtension.sidecar} to obtain the sidecar's typed
  *   capnweb remote main. Calls on that stub stream through capnweb \u2014 callback
