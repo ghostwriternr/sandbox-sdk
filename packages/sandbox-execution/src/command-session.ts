@@ -6,7 +6,18 @@ import {
   COMMAND_SESSION_FRAME_PREFIX,
   createCommandSessionScript
 } from './shell-script';
-import type { StdioChunk } from './stateless-process-runner';
+
+type PromiseWithResolvers<T> = {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: any) => void;
+};
+
+export type StdioChunk = {
+  stream: 'stdout' | 'stderr';
+  data: string;
+  seq: number;
+};
 
 const FRAME_PREFIX = COMMAND_SESSION_FRAME_PREFIX;
 const READY_TIMEOUT_MS = 2_000;
@@ -45,8 +56,9 @@ type PendingOperation =
   | {
       kind: 'exec';
       id: string;
-      resolve: (result: CommandSessionExecResult) => void;
-      reject: (error: Error) => void;
+      stdoutController: ReadableStreamDefaultController<Uint8Array>;
+      stderrController: ReadableStreamDefaultController<Uint8Array>;
+      exitCode: PromiseWithResolvers<number>;
       timeout?: ReturnType<typeof setTimeout>;
     }
   | {
@@ -61,36 +73,48 @@ type PendingOperation =
 
 type ProcessCompletion = {
   pid: number;
+  stdoutController?: ReadableStreamDefaultController<Uint8Array>;
+  stderrController?: ReadableStreamDefaultController<Uint8Array>;
+  exitCode: PromiseWithResolvers<number>;
   output: StdioChunk[];
   nextSeq: number;
   onOutput?: (chunk: StdioChunk) => void;
   timeout?: ReturnType<typeof setTimeout>;
   abortSignal?: AbortSignal;
   abortListener?: () => void;
-  resolve: (result: CommandSessionProcessResult) => void;
-  reject: (error: Error) => void;
 };
 
 export class CommandSessionProcess {
   constructor(
-    private readonly pid: number,
-    private readonly completion: Promise<CommandSessionProcessResult>
+    readonly pid: number,
+    readonly stdin: WritableStream<Uint8Array> | null,
+    readonly stdout: ReadableStream<Uint8Array> | null,
+    readonly stderr: ReadableStream<Uint8Array> | null,
+    readonly exitCode: Promise<number>,
+    private readonly killFn: (signal?: number) => Promise<void> | void,
+    readonly isBackground?: boolean
   ) {}
 
-  getPID(): number {
-    return this.pid;
+  async output(): Promise<{
+    stdout: ArrayBuffer;
+    stderr: ArrayBuffer;
+    exitCode: number;
+  }> {
+    const [stdout, stderr, exitCode] = await Promise.all([
+      this.stdout
+        ? new Response(this.stdout).arrayBuffer()
+        : new ArrayBuffer(0),
+      this.stderr
+        ? new Response(this.stderr).arrayBuffer()
+        : new ArrayBuffer(0),
+      this.exitCode
+    ]);
+
+    return { stdout, stderr, exitCode };
   }
 
-  wait(): Promise<CommandSessionProcessResult> {
-    return this.completion;
-  }
-
-  async kill(signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {
-    await killProcessTree(this.pid, signal);
-  }
-
-  async terminate(graceMs = PROCESS_TIMEOUT_GRACE_MS): Promise<void> {
-    await terminateProcessTree(this.pid, graceMs);
+  kill(signal?: number): Promise<void> | void {
+    return this.killFn(signal);
   }
 }
 
@@ -165,9 +189,13 @@ export class CommandSession implements AsyncDisposable {
   }
 
   async exec(
-    command: string,
+    command: string | string[],
     options: CommandSessionExecOptions = {}
-  ): Promise<CommandSessionExecResult> {
+  ): Promise<CommandSessionProcess> {
+    if (Array.isArray(command)) {
+      const cmdStr = argvToShellCommand(command);
+      return this.enqueueOperation(() => this.startProcessNow(cmdStr, options));
+    }
     return this.enqueueOperation(() => this.execNow(command, options));
   }
 
@@ -209,7 +237,14 @@ export class CommandSession implements AsyncDisposable {
   private enqueueOperation<T>(run: () => Promise<T>): Promise<T> {
     const result = this.operationQueue.then(run, run);
     this.operationQueue = result.then(
-      () => {},
+      async (val) => {
+        if (val && typeof val === 'object' && 'exitCode' in val) {
+          const proc = val as unknown as CommandSessionProcess;
+          if (!proc.isBackground) {
+            await proc.exitCode.catch(() => {});
+          }
+        }
+      },
       () => {}
     );
     return result;
@@ -227,27 +262,64 @@ export class CommandSession implements AsyncDisposable {
   private async execNow(
     command: string,
     options: CommandSessionExecOptions
-  ): Promise<CommandSessionExecResult> {
+  ): Promise<CommandSessionProcess> {
     this.assertReadyForOperation();
 
     const id = crypto.randomUUID().replaceAll('-', '');
     const encodedCommand = Buffer.from(
       buildScopedCommand(command, options)
     ).toString('base64');
-    const result = new Promise<CommandSessionExecResult>((resolve, reject) => {
-      const pending: PendingOperation = { kind: 'exec', id, resolve, reject };
-      if (options.timeoutMs !== undefined) {
-        pending.timeout = setTimeout(() => {
-          const error = new Error(`Timed out waiting for command ${id}`);
-          this.fail(error);
-          void this.cleanupResources();
-        }, options.timeoutMs);
+
+    let stdoutController!: ReadableStreamDefaultController<Uint8Array>;
+    const stdout = new ReadableStream<Uint8Array>({
+      start(controller) {
+        stdoutController = controller;
       }
-      this.pending = pending;
     });
 
+    let stderrController!: ReadableStreamDefaultController<Uint8Array>;
+    const stderr = new ReadableStream<Uint8Array>({
+      start(controller) {
+        stderrController = controller;
+      }
+    });
+
+    const exitCodeResolver = Promise.withResolvers<number>();
+
+    const killFn = () => {
+      try {
+        this.shell.kill('SIGINT');
+      } catch {}
+    };
+
+    const process = new CommandSessionProcess(
+      this.shell.pid,
+      null,
+      stdout,
+      stderr,
+      exitCodeResolver.promise,
+      killFn
+    );
+
+    const pending: PendingOperation = {
+      kind: 'exec',
+      id,
+      stdoutController,
+      stderrController,
+      exitCode: exitCodeResolver
+    };
+
+    if (options.timeoutMs !== undefined) {
+      pending.timeout = setTimeout(() => {
+        const error = new Error(`Timed out waiting for command ${id}`);
+        this.fail(error);
+        void this.cleanupResources();
+      }, options.timeoutMs);
+    }
+    this.pending = pending;
+
     await this.writeShell(`__sandbox_sessions_exec ${id} ${encodedCommand}\n`);
-    return result;
+    return process;
   }
 
   private async startProcessNow(
@@ -381,26 +453,58 @@ export class CommandSession implements AsyncDisposable {
     if (type === 'PROCESS_STARTED' && this.pending.kind === 'startProcess') {
       const pending = this.pending;
       this.pending = undefined;
-      const completion = Promise.withResolvers<CommandSessionProcessResult>();
       const pid = parsePID(field);
-      const process = new CommandSessionProcess(pid, completion.promise);
+
+      let stdoutController!: ReadableStreamDefaultController<Uint8Array>;
+      const stdout = new ReadableStream<Uint8Array>({
+        start(controller) {
+          stdoutController = controller;
+        }
+      });
+
+      let stderrController!: ReadableStreamDefaultController<Uint8Array>;
+      const stderr = new ReadableStream<Uint8Array>({
+        start(controller) {
+          stderrController = controller;
+        }
+      });
+
+      const exitCodeResolver = Promise.withResolvers<number>();
+
+      const killFn = async (signal?: number) => {
+        const sigName = signal === 9 ? 'SIGKILL' : 'SIGTERM';
+        await killProcessTree(pid, sigName);
+      };
+
+      const process = new CommandSessionProcess(
+        pid,
+        null,
+        stdout,
+        stderr,
+        exitCodeResolver.promise,
+        killFn,
+        true
+      );
+
       const processCompletion: ProcessCompletion = {
         pid,
+        stdoutController,
+        stderrController,
+        exitCode: exitCodeResolver,
         output: [],
         nextSeq: 0,
         onOutput: pending.onOutput,
-        abortSignal: pending.abortSignal,
-        resolve: completion.resolve,
-        reject: completion.reject
+        abortSignal: pending.abortSignal
       };
+
       if (pending.timeoutMs !== undefined) {
         processCompletion.timeout = setTimeout(() => {
-          void process.terminate();
+          void killFn();
         }, pending.timeoutMs);
       }
       if (pending.abortSignal) {
         processCompletion.abortListener = () => {
-          void process.terminate();
+          void killFn();
         };
         pending.abortSignal.addEventListener(
           'abort',
@@ -410,7 +514,7 @@ export class CommandSession implements AsyncDisposable {
       }
       this.processes.set(id, processCompletion);
       if (pending.abortSignal?.aborted) {
-        void process.terminate();
+        void killFn();
       }
       pending.resolve(process);
     }
@@ -437,6 +541,19 @@ export class CommandSession implements AsyncDisposable {
       seq: process.nextSeq++
     };
     process.output.push(chunk);
+
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(data);
+    if (stream === 'stdout' && process.stdoutController) {
+      try {
+        process.stdoutController.enqueue(bytes);
+      } catch {}
+    } else if (stream === 'stderr' && process.stderrController) {
+      try {
+        process.stderrController.enqueue(bytes);
+      } catch {}
+    }
+
     try {
       process.onOutput?.(chunk);
     } catch (error) {
@@ -452,11 +569,16 @@ export class CommandSession implements AsyncDisposable {
     this.processes.delete(id);
     this.cleanupProcess(process);
     const parsedExitCode = Number.parseInt(exitCode, 10);
-    process.resolve({
-      exitCode: Number.isNaN(parsedExitCode) ? 1 : parsedExitCode,
-      stdout: collectProcessOutput(process.output, 'stdout'),
-      stderr: collectProcessOutput(process.output, 'stderr')
-    });
+    const code = Number.isNaN(parsedExitCode) ? 1 : parsedExitCode;
+
+    try {
+      process.stdoutController?.close();
+    } catch {}
+    try {
+      process.stderrController?.close();
+    } catch {}
+
+    process.exitCode.resolve(code);
   }
 
   private fail(error: Error): void {
@@ -476,7 +598,17 @@ export class CommandSession implements AsyncDisposable {
     const pending = this.pending;
     this.pending = undefined;
     this.cleanupPending(pending);
-    pending.reject(error);
+    if (pending.kind === 'exec') {
+      try {
+        pending.stdoutController.error(error);
+      } catch {}
+      try {
+        pending.stderrController.error(error);
+      } catch {}
+      pending.exitCode.reject(error);
+    } else {
+      pending.reject(error);
+    }
   }
 
   private rejectProcess(id: string, error: Error): void {
@@ -486,7 +618,13 @@ export class CommandSession implements AsyncDisposable {
     }
     this.processes.delete(id);
     this.cleanupProcess(process);
-    process.reject(error);
+    try {
+      process.stdoutController?.error(error);
+    } catch {}
+    try {
+      process.stderrController?.error(error);
+    } catch {}
+    process.exitCode.reject(error);
   }
 
   private async terminateProcesses(error: Error): Promise<void> {
@@ -500,7 +638,13 @@ export class CommandSession implements AsyncDisposable {
       if (this.processes.get(id) === process) {
         this.processes.delete(id);
         this.cleanupProcess(process);
-        process.reject(error);
+        try {
+          process.stdoutController?.error(error);
+        } catch {}
+        try {
+          process.stderrController?.error(error);
+        } catch {}
+        process.exitCode.reject(error);
       }
     }
   }
@@ -522,13 +666,31 @@ export class CommandSession implements AsyncDisposable {
     const stdoutFile = join(this.tempDir, `${id}.stdout`);
     const stderrFile = join(this.tempDir, `${id}.stderr`);
     try {
-      pending.resolve({
-        exitCode: parseExitCode(exitCode),
-        stdout: await Bun.file(stdoutFile).text(),
-        stderr: await Bun.file(stderrFile).text()
-      });
+      const stdoutText = await Bun.file(stdoutFile).text();
+      const stderrText = await Bun.file(stderrFile).text();
+
+      const encoder = new TextEncoder();
+      if (stdoutText.length > 0) {
+        pending.stdoutController.enqueue(encoder.encode(stdoutText));
+      }
+      if (stderrText.length > 0) {
+        pending.stderrController.enqueue(encoder.encode(stderrText));
+      }
+
+      pending.stdoutController.close();
+      pending.stderrController.close();
+
+      const code = parseExitCode(exitCode);
+      pending.exitCode.resolve(code);
     } catch (error) {
-      pending.reject(toError(error));
+      const err = toError(error);
+      try {
+        pending.stdoutController.error(err);
+      } catch {}
+      try {
+        pending.stderrController.error(err);
+      } catch {}
+      pending.exitCode.reject(err);
     } finally {
       await Promise.all([
         rm(stdoutFile, { force: true }),
@@ -661,6 +823,10 @@ function indentFirstLine(command: string, spaces: number): string {
   return lines.length === 1
     ? `${prefix}${command}`
     : `${prefix}${lines[0]}\n${lines.slice(1).join('\n')}`;
+}
+
+function argvToShellCommand(argv: string[]): string {
+  return argv.map(shellQuote).join(' ');
 }
 
 function shellQuote(value: string): string {
