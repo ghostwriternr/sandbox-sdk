@@ -34,9 +34,11 @@ export type CommandSessionExecOptions = {
   cwd?: string;
   env?: Record<string, string | undefined>;
   timeoutMs?: number;
+  signal?: AbortSignal;
+  onOutput?: (chunk: StdioChunk) => void;
 };
 
-export type CommandSessionStartProcessOptions = {
+export type CommandSessionArgvOptions = {
   cwd?: string;
   env?: Record<string, string | undefined>;
   timeoutMs?: number;
@@ -54,7 +56,7 @@ type PendingOperation =
       timeout?: ReturnType<typeof setTimeout>;
     }
   | {
-      kind: 'startProcess';
+      kind: 'execArgv';
       id: string;
       timeoutMs?: number;
       abortSignal?: AbortSignal;
@@ -186,16 +188,9 @@ export class CommandSession implements AsyncDisposable {
   ): Promise<CommandSessionProcess> {
     if (Array.isArray(command)) {
       const cmdStr = argvToShellCommand(command);
-      return this.enqueueOperation(() => this.startProcessNow(cmdStr, options));
+      return this.enqueueOperation(() => this.execArgvNow(cmdStr, options));
     }
     return this.enqueueOperation(() => this.execNow(command, options));
-  }
-
-  async startProcess(
-    command: string,
-    options: CommandSessionStartProcessOptions = {}
-  ): Promise<CommandSessionProcess> {
-    return this.enqueueOperation(() => this.startProcessNow(command, options));
   }
 
   isReady(): boolean {
@@ -313,9 +308,9 @@ export class CommandSession implements AsyncDisposable {
     return process;
   }
 
-  private async startProcessNow(
+  private async execArgvNow(
     command: string,
-    options: CommandSessionStartProcessOptions
+    options: CommandSessionArgvOptions
   ): Promise<CommandSessionProcess> {
     this.assertReadyForOperation();
     if (options.signal?.aborted) {
@@ -328,7 +323,7 @@ export class CommandSession implements AsyncDisposable {
     ).toString('base64');
     const process = new Promise<CommandSessionProcess>((resolve, reject) => {
       this.pending = {
-        kind: 'startProcess',
+        kind: 'execArgv',
         id,
         timeoutMs: options.timeoutMs,
         abortSignal: options.signal,
@@ -441,7 +436,7 @@ export class CommandSession implements AsyncDisposable {
       return;
     }
 
-    if (type === 'PROCESS_STARTED' && this.pending.kind === 'startProcess') {
+    if (type === 'PROCESS_STARTED' && this.pending.kind === 'execArgv') {
       const pending = this.pending;
       this.pending = undefined;
       const pid = parsePID(field);

@@ -187,7 +187,7 @@ async executeInSession(sessionId, command) {
 - Commands in DIFFERENT sessions can run in parallel
 - Multiple sandboxes (different DO instances) are completely independent
 
-**Background processes**: When starting a background process via `startProcess()`, the mutex is released after the process emits its 'start' event (not after exit). This allows subsequent commands to run while the background process continues.
+**Background processes**: When starting a process, it can run independently in the background.
 
 ## Layer 4: Shell Execution
 
@@ -210,7 +210,7 @@ This is fundamentally different from JavaScript's event loop concurrency:
 ### What This Means
 
 - A long-running process doesn't block other processes
-- Background processes (`startProcess()`) run independently
+- Processes run independently
 - Resource contention (CPU, memory, disk) is managed by the OS
 - Session serialization only affects when commands START, not their parallel execution
 
@@ -263,7 +263,7 @@ await this.ctx.storage.put(`port:${port}:token`, newToken);
 **Already handled:**
 
 - SessionManager serializes command execution per session
-- ProcessManager handles concurrent process operations
+- Process execution is handled safely by the container runtime
 
 **Requires care:**
 

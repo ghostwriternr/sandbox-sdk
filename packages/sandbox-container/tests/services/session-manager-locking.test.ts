@@ -211,123 +211,22 @@ describe('SessionManager Locking', () => {
     });
   });
 
-  describe('process stream locking', () => {
-    it('should release lock early for streaming processes', async () => {
-      const sessionId = 'stream-bg-session';
+  it('should surface SESSION_TERMINATED with exit code for exit commands', async () => {
+    const sessionId = 'exit-shell-session';
 
-      const streamResult = await sessionManager.startProcessStreamInSession(
-        sessionId,
-        'sleep 0.5; echo "bg-done"',
-        async () => {},
-        { cwd: testDir },
-        'cmd-bg'
-      );
-
-      expect(streamResult.success).toBe(true);
-
-      const execResult = await sessionManager.executeInSession(
-        sessionId,
-        'echo "exec-fast"',
-        { cwd: testDir }
-      );
-
-      expect(execResult.success).toBe(true);
-      if (streamResult.success) {
-        await streamResult.data.continueStreaming;
-      }
-    });
-  });
-
-  describe('destroy during active streaming', () => {
-    it('should not crash when session is destroyed during background streaming', async () => {
-      const sessionId = 'stream-destroy-session';
-      const events: { type: string; error?: string; exitCode?: number }[] = [];
-
-      // Runtime process streaming releases the lock after the 'start' event,
-      // so the process lifecycle continues without holding the session mutex.
-      const streamResult = await sessionManager.startProcessStreamInSession(
-        sessionId,
-        'sleep 10',
-        async (event) => {
-          events.push({
-            type: event.type,
-            error:
-              event.type === 'error'
-                ? (event as { error?: string }).error
-                : undefined,
-            exitCode:
-              event.type === 'complete'
-                ? (event as { exitCode?: number }).exitCode
-                : undefined
-          });
-        },
-        { cwd: testDir },
-        'cmd-destroy-race'
-      );
-
-      expect(streamResult.success).toBe(true);
-
-      // The runtime process stream is now active in the background.
-      // Destroying the session exercises the concurrent destroy + streaming
-      // code path.
-      const deleteResult = await sessionManager.deleteSession(sessionId);
-      expect(deleteResult.success).toBe(true);
-
-      // The streaming promise must settle (not hang). Race against
-      // a timeout to catch both crashes and stuck promises.
-      if (streamResult.success) {
-        const timeout = new Promise<'timeout'>((resolve) =>
-          setTimeout(() => resolve('timeout'), 5000)
-        );
-        const result = await Promise.race([
-          streamResult.data.continueStreaming
-            .then(() => 'resolved' as const)
-            .catch(() => 'rejected' as const),
-          timeout
-        ]);
-
-        expect(result).not.toBe('timeout');
-      }
-
-      // Verify we got a start event (streaming did begin)
-      expect(events.some((e) => e.type === 'start')).toBe(true);
-
-      // Session teardown races with runtime process completion. Either an error
-      // or a non-zero complete event is valid as long as the stream settles and
-      // reports a terminal event.
-      const errorEvent = events.find((e) => e.type === 'error');
-      const completeEvent = events.find((e) => e.type === 'complete');
-
-      expect(errorEvent || completeEvent).toBeDefined();
-
-      if (errorEvent) {
-        expect(errorEvent.error).toMatch(/destroyed|terminated/i);
-      }
-
-      if (completeEvent) {
-        expect(completeEvent.exitCode).not.toBe(0);
-      }
+    const result = await sessionManager.executeInSession(sessionId, 'exit 1', {
+      cwd: testDir
     });
 
-    it('should surface SESSION_TERMINATED with exit code for exit commands', async () => {
-      const sessionId = 'exit-shell-session';
-
-      const result = await sessionManager.executeInSession(
-        sessionId,
-        'exit 1',
-        { cwd: testDir }
-      );
-
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error.code).toBe('SESSION_TERMINATED');
-        expect(result.error.message).toMatch(/exit code.*1/i);
-        const details = result.error.details as {
-          sessionId: string;
-          exitCode: number | null;
-        };
-        expect(details.sessionId).toBe(sessionId);
-      }
-    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.code).toBe('SESSION_TERMINATED');
+      expect(result.error.message).toMatch(/exit code.*1/i);
+      const details = result.error.details as {
+        sessionId: string;
+        exitCode: number | null;
+      };
+      expect(details.sessionId).toBe(sessionId);
+    }
   });
 });

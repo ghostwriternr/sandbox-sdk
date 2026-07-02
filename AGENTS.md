@@ -130,7 +130,7 @@ See the **logging** skill (`.agents/skills/logging/SKILL.md`) for the constructo
 
 ### Session Management
 
-- Top-level `sandbox.exec()` and `sandbox.startProcess()` are stateless.
+- Top-level `sandbox.exec()` is stateless.
 - Explicit sessions isolate execution contexts (working directory, env vars, aliases, functions, etc.).
 - Multiple explicit sessions per sandbox are supported.
 

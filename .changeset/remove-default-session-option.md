@@ -2,6 +2,6 @@
 '@cloudflare/sandbox': minor
 ---
 
-Top-level execution is now stateless by default. `exec()`, `startProcess()`, file, watch, git, and backup calls no longer reuse a hidden default session; pass an explicit `sessionId` or `sandbox.createSession()` when commands need to share shell state. Process reads use `listProcesses({ sessionId })` / `getProcess(id, { sessionId })`, and process kill methods no longer accept signal arguments.
+Top-level execution is now stateless by default. `exec()`, file, watch, git, and backup calls no longer reuse a hidden default session; create an explicit session via `sandbox.createSession()` and use `session.exec()` when commands need to share shell state.
 
-Streaming command execution has moved to `startProcess()` — `execStream()` and `exec({ stream, onOutput, onComplete, onError, signal })` are removed. Interactive terminals are now explicit resources: use `sandbox.terminal({ id, cwd, shell }).connect(request, { cols, rows })` instead of the removed `ExecutionSession.terminal()`.
+Command execution has been redesigned to use native container capabilities, returning a process handle supporting `.output()` and streaming output via `.stdout`/`.stderr` readable streams. Legacy streaming execution APIs such as `execStream()` and `exec({ stream, onOutput, onComplete, onError, signal })` are removed. Interactive terminals are now explicit resources: use `sandbox.terminal({ id, cwd, shell }).connect(request, { cols, rows })` instead of the removed `ExecutionSession.terminal()`.

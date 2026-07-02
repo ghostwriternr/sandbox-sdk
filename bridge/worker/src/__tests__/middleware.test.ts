@@ -20,7 +20,24 @@ describe('Auth middleware — /v1/sandbox/*', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // Re-apply sandbox mock defaults
-    mockSandbox.exec.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 });
+    mockSandbox.exec.mockResolvedValue({
+      stdout: new ReadableStream({
+        start(c) {
+          c.close();
+        }
+      }),
+      stderr: new ReadableStream({
+        start(c) {
+          c.close();
+        }
+      }),
+      exitCode: Promise.resolve(0),
+      output: async () => ({
+        stdout: new Uint8Array(),
+        stderr: new Uint8Array(),
+        exitCode: 0
+      })
+    });
   });
 
   it('allows requests with a valid Bearer token', async () => {
@@ -58,7 +75,24 @@ describe('Auth middleware — /v1/sandbox/*', () => {
 describe('Sandbox ID validation', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockSandbox.exec.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 });
+    mockSandbox.exec.mockResolvedValue({
+      stdout: new ReadableStream({
+        start(c) {
+          c.close();
+        }
+      }),
+      stderr: new ReadableStream({
+        start(c) {
+          c.close();
+        }
+      }),
+      exitCode: Promise.resolve(0),
+      output: async () => ({
+        stdout: new Uint8Array(),
+        stderr: new Uint8Array(),
+        exitCode: 0
+      })
+    });
   });
 
   it('accepts a valid base32 ID (lowercase + digits 2-7)', async () => {
@@ -140,7 +174,24 @@ describe('Auth middleware — /v1/openapi.*', () => {
 describe('Versioning — old routes return 404', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockSandbox.exec.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 });
+    mockSandbox.exec.mockResolvedValue({
+      stdout: new ReadableStream({
+        start(c) {
+          c.close();
+        }
+      }),
+      stderr: new ReadableStream({
+        start(c) {
+          c.close();
+        }
+      }),
+      exitCode: Promise.resolve(0),
+      output: async () => ({
+        stdout: new Uint8Array(),
+        stderr: new Uint8Array(),
+        exitCode: 0
+      })
+    });
   });
 
   it('returns 404 for unversioned /sandbox/:id/running', async () => {

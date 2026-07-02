@@ -47,7 +47,7 @@ The musl image is a lightweight, functional sandbox. It supports all core SDK me
 
 | Capability                                 | Supported | Notes                                                           |
 | ------------------------------------------ | --------- | --------------------------------------------------------------- |
-| `exec()`, `startProcess()`                 | ✅        | Shell commands via `bash`                                       |
+| `exec()`                                   | ✅        | Shell commands via `bash`                                       |
 | `readFile()`, `writeFile()`, `listFiles()` | ✅        | Requires `file` (included)                                      |
 | `gitCheckout()`, `listBranches()`          | ✅        | Requires `git` (included)                                       |
 | `mountBucket()`, `unmountBucket()`         | ✅        | Requires `s3fs-fuse` and `fuse` (included)                      |
@@ -78,7 +78,6 @@ Most glibc-based images (node:slim, python:slim, ubuntu) include everything exce
 ## What Works Without Extra Dependencies
 
 - `exec()` - Run shell commands
-- `startProcess()` - Background processes
 - `exposePort()` - Expose services
 
 ## Troubleshooting

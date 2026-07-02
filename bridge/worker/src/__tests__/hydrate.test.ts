@@ -20,7 +20,24 @@ function makeTarBody(): Uint8Array {
 describe('POST /v1/sandbox/:id/hydrate — hardcoded root, shell-quoted commands', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockSandbox.exec.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 });
+    mockSandbox.exec.mockResolvedValue({
+      stdout: new ReadableStream({
+        start(c) {
+          c.close();
+        }
+      }),
+      stderr: new ReadableStream({
+        start(c) {
+          c.close();
+        }
+      }),
+      exitCode: Promise.resolve(0),
+      output: async () => ({
+        stdout: new Uint8Array(),
+        stderr: new Uint8Array(),
+        exitCode: 0
+      })
+    });
     mockSandbox.writeFile.mockResolvedValue(undefined);
   });
 

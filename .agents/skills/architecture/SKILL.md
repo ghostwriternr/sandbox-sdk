@@ -66,8 +66,8 @@ Specialized non-control channels remain separate:
 
 - **DI container** (`core/container.ts`) — manages service lifecycle and wiring
 - **Control plane** (`control-plane/`) — container-side API called by the Sandbox DO
-- **Services** (`services/`) — business logic (`ProcessService`, `FileService`, `PortService`, …)
-- **Managers** (`managers/`) — stateful coordinators such as `ProcessManager`
+- **Services** (`services/`) — business logic (`FileService`, `PortService`, …)
+- **Managers** (`managers/`) — stateful coordinators such as `FileManager`
 - **Execution runtime** (`@repo/sandbox-execution`) — stateless commands, persistent command sessions, and lifecycle-managed processes
 - **Session manager** (`services/session-manager.ts`) — explicit session lifecycle, locking, and runtime adapters
 - **Terminal handler** (`handlers/terminal-ws-handler.ts`) — terminal WebSocket byte transport
@@ -96,7 +96,7 @@ Uses npm workspaces + Turbo:
 
 ## Cross-Cutting Patterns
 
-- **Execution** — top-level `exec()` / `startProcess()` are stateless. Explicit sessions isolate command state (cwd, env vars, aliases, functions) and are created via `createSession()`.
+- **Execution** — top-level `exec()` is stateless. Explicit sessions isolate command state (cwd, env vars, aliases, functions) and are created via `createSession()`.
 - **Ports** — expose internal services via preview URLs with token auth. Preview URL authorization is Durable Object-owned, while forwarding is active only after `exposePort()` activates the port for the current runtime. Production preview URLs require a custom domain with wildcard DNS (`*.yourdomain.com`); `.workers.dev` does not support the required subdomain patterns.
 - **Container isolation** — handled at the Cloudflare platform level (VMs), not by SDK code.
 

@@ -14,7 +14,24 @@ const env = createMockEnv();
 describe('POST /v1/sandbox/:id/persist — hardcoded root, exclude validation, quoting', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockSandbox.exec.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 });
+    mockSandbox.exec.mockResolvedValue({
+      stdout: new ReadableStream({
+        start(c) {
+          c.close();
+        }
+      }),
+      stderr: new ReadableStream({
+        start(c) {
+          c.close();
+        }
+      }),
+      exitCode: Promise.resolve(0),
+      output: async () => ({
+        stdout: new Uint8Array(),
+        stderr: new Uint8Array(),
+        exitCode: 0
+      })
+    });
     mockSandbox.readFileStream.mockResolvedValue(createSSEFileStream('tar-data', { isBinary: true }));
   });
 

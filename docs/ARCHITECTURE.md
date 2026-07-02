@@ -85,7 +85,7 @@ ContainerControlClient
 `ContainerControlClient` exposes typed domains matching `SandboxAPI`:
 
 ```text
-commands, files, processes, ports, git, interpreter, utils, backup, watch, tunnels, terminals
+sessions, files, ports, git, utils, backup, watch, tunnels, terminals, extensions
 ```
 
 `ContainerControlConnection` owns:
@@ -99,19 +99,26 @@ The container-side control plane is implemented in `packages/sandbox-container/s
 
 ## Request Flow
 
-A typical command execution flows through all layers:
+A typical native command execution flows through the Cloudflare container runtime:
 
 ```text
 Worker code
   -> sandbox.exec("echo hello")
   -> Sandbox DO method
-  -> ContainerControlClient.commands.execute(...)
+  -> ctx.container.exec() [Native Container API]
+```
+
+Stateful execution within an explicit session flows through the control plane:
+
+```text
+Worker code
+  -> session.exec("echo hello")
+  -> Sandbox DO method
+  -> ContainerControlClient.sessions.exec(...)
   -> capnweb call over /rpc
-  -> SandboxControlAPI.commands.execute(...)
-  -> ProcessService.executeCommand(...)
-  -> ExecutionService.execute(...)
-  -> StatelessCommandRunner.exec(...)
-  -> one-shot shell command
+  -> SandboxControlAPI.sessions.exec(...)
+  -> SessionManager.executeInSession(...)
+  -> CommandSession.exec(...)
 ```
 
 Streaming operations return `ReadableStream<Uint8Array>` values over capnweb. The bytes are SSE-framed so existing SDK consumers can parse them with the same code, but the transport is the `/rpc` control channel.
@@ -134,13 +141,11 @@ The Bun server also keeps `/ws/terminal` for terminal resources. Non-WebSocket H
 
 ### Sessions
 
-Explicit sessions isolate execution contexts such as working directory and environment variables. `SessionManager` serializes command execution per session and owns session lifecycle. Top-level `sandbox.exec()` and `sandbox.startProcess()` are stateless and do not create hidden persistent sessions.
+Explicit sessions isolate execution contexts such as working directory and environment variables. `SessionManager` serializes command execution per session and owns session lifecycle. Top-level `sandbox.exec()` is stateless and does not create hidden persistent sessions.
 
 ### Command Execution
 
-Command execution is split by semantics. `exec()` is completion-only; `startProcess()` owns streaming, kill, and timeout lifecycle. Explicit `session.exec()` preserves shell state through `@repo/sandbox-execution` `CommandSession`, while `session.startProcess()` starts a lifecycle-managed process from inherited session state without writing process mutations back to the parent session.
-
-See [SESSION_EXECUTION.md](./SESSION_EXECUTION.md) for details.
+Top-level `exec()` is stateless. Explicit `session.exec()` preserves shell state through `@repo/sandbox-execution` `CommandSession`.
 
 ### Port Exposure
 

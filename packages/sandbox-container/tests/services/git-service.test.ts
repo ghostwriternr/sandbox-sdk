@@ -34,8 +34,6 @@ mockLogger.child = vi.fn(() => mockLogger);
 // Properly typed mock SessionManager
 const mockSessionManager = {
   executeInSession: vi.fn(),
-  startProcessStreamInSession: vi.fn(),
-  killCommand: vi.fn(),
   setEnvVars: vi.fn(),
   getSession: vi.fn(),
   createSession: vi.fn(),

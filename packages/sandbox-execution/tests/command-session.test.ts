@@ -157,15 +157,18 @@ describe('CommandSession', () => {
     await using session = await CommandSession.create();
     const controller = new AbortController();
     let childPid = 0;
-    const proc = await session.startProcess('sleep 100 & echo "PID:$!"; wait', {
-      signal: controller.signal,
-      onOutput: (chunk) => {
-        const match = chunk.data.match(/PID:(\d+)/);
-        if (match) {
-          childPid = Number.parseInt(match[1], 10);
+    const proc = await session.exec(
+      ['bash', '-c', 'sleep 100 & echo "PID:$!"; wait'],
+      {
+        signal: controller.signal,
+        onOutput: (chunk) => {
+          const match = chunk.data.match(/PID:(\d+)/);
+          if (match) {
+            childPid = Number.parseInt(match[1], 10);
+          }
         }
       }
-    });
+    );
 
     // Wait until the child PID is captured
     for (let i = 0; i < 100 && childPid === 0; i++) {
@@ -199,7 +202,7 @@ describe('CommandSession', () => {
 
   it('kills a background process and descendants on timeoutMs', async () => {
     await using session = await CommandSession.create();
-    const process = await session.startProcess('sleep 10', { timeoutMs: 50 });
+    const process = await session.exec(['sleep', '10'], { timeoutMs: 50 });
     const res = await getProcessText(process);
     expect(res.exitCode).not.toBe(0);
   });
