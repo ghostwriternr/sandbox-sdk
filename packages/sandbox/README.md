@@ -85,7 +85,7 @@ export default {
       const proc = await sandbox.exec('python3 -c "print(2 + 2)"');
       const output = await proc.output();
       const text = new TextDecoder().decode(output.stdout);
-      return Response.json({ output: text, success: output.success });
+      return Response.json({ output: text, success: output.exitCode === 0 });
     }
 
     // Work with files
@@ -102,7 +102,7 @@ export default {
 
 ## Command Execution
 
-To execute commands stateless by default:
+To execute commands statelessly by default:
 
 ```ts
 const proc = await sandbox.exec('python --version');

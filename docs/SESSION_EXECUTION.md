@@ -1,7 +1,7 @@
 # Session Execution Architecture
 
 This document describes the current command execution model in the sandbox
-runtime. The model utilizes process handles for execution, and separates shell sessions and terminal/PTY interaction.
+runtime. The model uses process handles for execution, and separates shell sessions and terminal/PTY interaction.
 
 ## Goals
 
@@ -23,7 +23,7 @@ runtime. The model utilizes process handles for execution, and separates shell s
 | `session.exec(string[])` | Inherits session cwd/env at launch | Session runtime process                                    | Workerd-like process handle |
 | `sandbox.terminal()`     | Independent PTY state              | Terminal manager                                           | PTY bytes                   |
 
-`exec()` returns a process handle, and `output()` is the buffered convenience. Let's look at the implementation details.
+`exec()` returns a process handle, and `output()` is the buffered convenience.
 
 ## Top-Level Stateless Execution
 
@@ -71,8 +71,8 @@ back to the session. It returns a process handle, and calling `output()` on it r
 ```ts
 {
   exitCode: number;
-  stdout: Uint8Array;
-  stderr: Uint8Array;
+  stdout: ArrayBuffer;
+  stderr: ArrayBuffer;
 }
 ```
 
