@@ -7,19 +7,26 @@ import type {
   SessionListResult,
   SessionOptions
 } from '@repo/shared';
-import type { ServiceResult } from '../core/types';
-import type { SessionManager } from './session-manager';
+import type { ServiceError } from '../core/types';
+import type { ManagedSession, SessionManager } from './session-manager';
 
-function throwIfError(result: ServiceResult<any, any>): void {
-  if (!result.success) {
+interface ServiceResultLike {
+  success: boolean;
+  error?: ServiceError;
+}
+
+function throwIfError(result: ServiceResultLike): void {
+  if (!result.success && result.error) {
     const { code, message, details } = result.error;
     throw Object.assign(new Error(message), { code, details });
   }
 }
 
-function extractData<T>(result: ServiceResult<any, any>): T {
+function extractData<T>(
+  result: { success: true; data: T } | { success: false; error: ServiceError }
+): T {
   throwIfError(result);
-  return (result as { data: T }).data;
+  return (result as { success: true; data: T }).data;
 }
 
 export class SessionService {
@@ -31,14 +38,12 @@ export class SessionService {
       id: options.id || crypto.randomUUID()
     };
     const result = await this.sessionManager.createSession(sessionOpts);
-    const session = extractData<{ id: string; name?: string; cwd?: string }>(
-      result
-    );
+    extractData<ManagedSession>(result);
     return {
       success: true,
-      sessionId: session.id,
-      name: session.name,
-      cwd: session.cwd,
+      sessionId: sessionOpts.id,
+      name: sessionOpts.name,
+      cwd: sessionOpts.cwd,
       timestamp: new Date().toISOString()
     };
   }

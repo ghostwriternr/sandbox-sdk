@@ -53,9 +53,27 @@ export class GitService {
     } catch (error) {
       return {
         success: false,
-        error: error as any
+        error: this.toServiceError(error)
       };
     }
+  }
+
+  private toServiceError(error: unknown): ServiceError {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      'message' in error &&
+      typeof (error as Record<string, unknown>).code === 'string' &&
+      typeof (error as Record<string, unknown>).message === 'string'
+    ) {
+      return error as ServiceError;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      message,
+      code: ErrorCode.INTERNAL_ERROR
+    };
   }
 
   /**
@@ -232,16 +250,18 @@ export class GitService {
       const result = this.returnSuccess(cloneData);
       outcome = 'success';
       return result;
-    } catch (error: any) {
+    } catch (error) {
       if (
         error &&
         typeof error === 'object' &&
         'code' in error &&
-        'message' in error
+        'message' in error &&
+        typeof (error as Record<string, unknown>).code === 'string' &&
+        typeof (error as Record<string, unknown>).message === 'string'
       ) {
         outcome = 'error';
-        errorMessage = error.message;
-        return this.returnError(error);
+        errorMessage = (error as { message: string }).message;
+        return this.returnError(error as ServiceError);
       }
       caughtError = error instanceof Error ? error : new Error(String(error));
       errorMessage = caughtError.message;

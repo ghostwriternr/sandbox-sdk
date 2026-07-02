@@ -68,18 +68,23 @@ export interface SandboxAPIDeps {
 // RPC error helpers
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- accepts any ServiceResult variant
-function throwIfError(result: ServiceResult<any, any>): void {
-  if (!result.success) {
+interface ServiceResultLike {
+  success: boolean;
+  error?: ServiceError;
+}
+
+function throwIfError(result: ServiceResultLike): void {
+  if (!result.success && result.error) {
     const { code, message, details } = result.error;
     throw Object.assign(new Error(message), { code, details });
   }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- accepts any ServiceResult variant
-function extractData<T>(result: ServiceResult<any, any>): T {
+function extractData<T>(
+  result: { success: true; data: T } | { success: false; error: ServiceError }
+): T {
   throwIfError(result);
-  return (result as { data: T }).data;
+  return (result as { success: true; data: T }).data;
 }
 
 /**
@@ -436,7 +441,6 @@ class PortsRPCAPI extends RpcTarget {
     path?: string;
     statusMin?: number;
     statusMax?: number;
-    processId?: string;
     interval?: number;
   }): Promise<ReadableStream<Uint8Array>> {
     const encoder = new TextEncoder();

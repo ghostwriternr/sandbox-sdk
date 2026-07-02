@@ -6,6 +6,7 @@ import {
 } from '@repo/shared/backup';
 import { ErrorCode, Operation } from '@repo/shared/errors';
 import {
+  type ServiceError,
   type ServiceResult,
   serviceError,
   serviceSuccess
@@ -139,9 +140,27 @@ export class BackupService {
     } catch (error) {
       return {
         success: false,
-        error: error as any
+        error: this.toServiceError(error)
       };
     }
+  }
+
+  private toServiceError(error: unknown): ServiceError {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      'message' in error &&
+      typeof (error as Record<string, unknown>).code === 'string' &&
+      typeof (error as Record<string, unknown>).message === 'string'
+    ) {
+      return error as ServiceError;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      message,
+      code: ErrorCode.INTERNAL_ERROR
+    };
   }
 
   /**

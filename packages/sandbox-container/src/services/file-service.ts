@@ -14,6 +14,7 @@ import {
   type FileStats,
   type MkdirOptions,
   type ReadOptions,
+  type ServiceError,
   type ServiceResult,
   serviceError,
   serviceSuccess,
@@ -21,7 +22,10 @@ import {
 } from '../core/types';
 import { FileManager } from '../managers/file-manager';
 import type { RawExecResult } from '../session-types';
-import type { CommandContextService } from './command-context-service';
+import type {
+  CommandContextService,
+  ContextExec
+} from './command-context-service';
 
 export interface SecurityService {
   validatePath(path: string): { isValid: boolean; errors: string[] };
@@ -104,7 +108,7 @@ export class FileService implements FileSystemOperations {
 
   private async withExecutionInternal<T>(
     sessionId: string | undefined,
-    fn: (exec: any) => Promise<T>
+    fn: (exec: ContextExec) => Promise<T>
   ): Promise<ServiceResult<T>> {
     try {
       const data = await this.commandContextService.withExecution(
@@ -113,8 +117,26 @@ export class FileService implements FileSystemOperations {
       );
       return serviceSuccess(data);
     } catch (error) {
-      return serviceError(error as any);
+      return serviceError(this.toServiceError(error));
     }
+  }
+
+  private toServiceError(error: unknown): ServiceError {
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      'message' in error &&
+      typeof (error as Record<string, unknown>).code === 'string' &&
+      typeof (error as Record<string, unknown>).message === 'string'
+    ) {
+      return error as ServiceError;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      message,
+      code: ErrorCode.INTERNAL_ERROR
+    };
   }
 
   private async executeInternal(
@@ -133,7 +155,7 @@ export class FileService implements FileSystemOperations {
       });
       return serviceSuccess(result);
     } catch (error) {
-      return serviceError(error as any);
+      return serviceError(this.toServiceError(error));
     }
   }
 

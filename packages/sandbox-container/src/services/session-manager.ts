@@ -37,7 +37,7 @@ export interface ExecEvent {
   data?: string;
   command?: string;
   exitCode?: number;
-  result?: any;
+  result?: RawExecResult & { success?: boolean };
   error?: string;
   sessionId?: string;
   pid?: number;
@@ -63,7 +63,7 @@ type ManagedSessionExecOptions = {
   origin?: 'user' | 'internal';
 };
 
-interface ManagedSession {
+export interface ManagedSession {
   initialize(): Promise<void>;
   exec(
     command: string,
