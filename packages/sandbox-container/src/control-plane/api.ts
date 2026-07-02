@@ -3,9 +3,9 @@ import type {
   BackupRestoreArchiveOptions,
   CheckChangesRequest,
   CheckChangesResult,
-  CommandExecuteOptions,
   EnsureTunnelRunRequest,
   EnsureTunnelRunResult,
+  ExecOptions,
   ExtensionConnectRequest,
   ExtensionHealth,
   FileEncoding,
@@ -15,12 +15,17 @@ import type {
   ListFilesOptions,
   Logger,
   MkdirOptions,
-  ProcessStartOptions,
   ReadFileBinaryOptions,
   ReadFileOptions,
   ReadFileStreamOptions,
   SandboxAPI,
+  SandboxCommand,
   SessionCreateOptions,
+  SessionCreateResult,
+  SessionDeleteResult,
+  SessionExecStartResult,
+  SessionListResult,
+  SessionOptions,
   StopTunnelRunRequest,
   StopTunnelRunResult,
   TunnelInfo,
@@ -82,27 +87,23 @@ function extractData<T>(result: ServiceResult<any, any>): T {
  * Container control-plane API exposed over capnweb.
  *
  * Each domain is exposed as a nested RpcTarget so the client can access
- * them directly as `commands`, `files`, etc. Top-level methods handle
+ * them directly as `sessions`, `files`, etc. Top-level methods handle
  * utility and session management.
  */
 export class SandboxControlAPI extends RpcTarget implements SandboxAPI {
   #deps: SandboxAPIDeps;
+  readonly sessions: SessionsRPCAPI;
 
   constructor(deps: SandboxAPIDeps) {
     super();
     this.#deps = deps;
+    this.sessions = new SessionsRPCAPI(deps.sessionManager);
   }
 
   // --- Domain sub-stubs (nested RpcTargets) --------------------------------
 
-  get commands() {
-    return new CommandsRPCAPI(this.#deps.processService);
-  }
   get files() {
     return new FilesRPCAPI(this.#deps.fileService);
-  }
-  get processes() {
-    return new ProcessesRPCAPI(this.#deps.processService);
   }
   get ports() {
     return new PortsRPCAPI(this.#deps.portService, this.#deps.processService);
@@ -164,43 +165,63 @@ class TerminalsRPCAPI extends RpcTarget {
 }
 
 // ===========================================================================
-// Commands
+// Sessions
 // ===========================================================================
 
-class CommandsRPCAPI extends RpcTarget {
-  #svc: ProcessService;
-  constructor(svc: ProcessService) {
+class SessionsRPCAPI extends RpcTarget {
+  #svc: SessionManager;
+
+  constructor(svc: SessionManager) {
     super();
     this.#svc = svc;
   }
 
-  async execute(
-    command: string,
-    options?: CommandExecuteOptions
-  ): Promise<{
-    success: boolean;
-    exitCode: number;
-    stdout: string;
-    stderr: string;
-    command: string;
-    timestamp: string;
-  }> {
-    const result = await this.#svc.executeCommand(command, {
-      sessionId: options?.sessionId,
-      timeoutMs: options?.timeoutMs,
-      env: options?.env,
-      cwd: options?.cwd,
-      origin: options?.origin
-    });
-    const data = extractData<CommandResult>(result);
+  async create(
+    options: SessionCreateOptions = {} as any
+  ): Promise<SessionCreateResult> {
+    const sessionOpts = {
+      ...options,
+      id: options.id || crypto.randomUUID()
+    };
+    const result = await this.#svc.createSession(sessionOpts);
+    const session = extractData<{ id: string; name?: string; cwd?: string }>(
+      result
+    );
     return {
-      success: data.success,
-      exitCode: data.exitCode,
-      stdout: data.stdout,
-      stderr: data.stderr,
-      command,
+      success: true,
+      sessionId: session.id,
+      name: session.name,
+      cwd: session.cwd,
       timestamp: new Date().toISOString()
     };
+  }
+
+  async delete(sessionId: string): Promise<SessionDeleteResult> {
+    const result = await this.#svc.deleteSession(sessionId);
+    throwIfError(result);
+    return {
+      success: true,
+      sessionId,
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  async list(): Promise<SessionListResult> {
+    const result = await this.#svc.listSessions();
+    const sessions = extractData<string[]>(result);
+    return {
+      success: true,
+      sessions: sessions.map((id) => ({ id })),
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  async exec(
+    sessionId: string,
+    command: SandboxCommand,
+    options: ExecOptions = {}
+  ): Promise<SessionExecStartResult> {
+    throw new Error('exec in SessionService is not implemented yet');
   }
 }
 
@@ -422,161 +443,6 @@ class FilesRPCAPI extends RpcTarget {
     const result = await this.#svc.exists(path, options.sessionId);
     const exists = extractData<boolean>(result);
     return { success: true, exists, path, timestamp: new Date().toISOString() };
-  }
-}
-
-// ===========================================================================
-// Processes
-// ===========================================================================
-
-class ProcessesRPCAPI extends RpcTarget {
-  #svc: ProcessService;
-  constructor(svc: ProcessService) {
-    super();
-    this.#svc = svc;
-  }
-
-  async startProcess(command: string, options: ProcessStartOptions = {}) {
-    const result = await this.#svc.startProcess(command, options);
-    const proc = extractData<ProcessRecord>(result);
-    return {
-      success: true,
-      processId: proc.id,
-      pid: proc.pid,
-      command: proc.command,
-      timestamp: proc.startTime.toISOString()
-    };
-  }
-
-  async listProcesses() {
-    const result = await this.#svc.listProcesses();
-    const procs = extractData<ProcessRecord[]>(result);
-    return {
-      success: true,
-      processes: procs.map((p) => ({
-        id: p.id,
-        pid: p.pid,
-        command: p.command,
-        status: p.status,
-        startTime: p.startTime.toISOString(),
-        exitCode: p.exitCode
-      })),
-      timestamp: new Date().toISOString()
-    };
-  }
-
-  async getProcess(id: string) {
-    const result = await this.#svc.getProcess(id);
-    const proc = extractData<ProcessRecord>(result);
-    return {
-      success: true,
-      process: {
-        id: proc.id,
-        pid: proc.pid,
-        command: proc.command,
-        status: proc.status,
-        startTime: proc.startTime.toISOString(),
-        exitCode: proc.exitCode
-      },
-      timestamp: new Date().toISOString()
-    };
-  }
-
-  async killProcess(id: string) {
-    const result = await this.#svc.killProcess(id);
-    throwIfError(result);
-    return {
-      success: true,
-      processId: id,
-      timestamp: new Date().toISOString()
-    };
-  }
-
-  async killAllProcesses() {
-    const result = await this.#svc.killAllProcesses();
-    const count = extractData<number>(result);
-    return {
-      success: true,
-      cleanedCount: count,
-      timestamp: new Date().toISOString()
-    };
-  }
-
-  async getProcessLogs(id: string) {
-    const result = await this.#svc.getProcess(id);
-    const proc = extractData<ProcessRecord>(result);
-    return {
-      success: true,
-      processId: id,
-      stdout: proc.stdout,
-      stderr: proc.stderr,
-      timestamp: new Date().toISOString()
-    };
-  }
-
-  async streamProcessLogs(id: string): Promise<ReadableStream<Uint8Array>> {
-    const encoder = new TextEncoder();
-    const result = await this.#svc.getProcess(id);
-    const proc = extractData<ProcessRecord>(result);
-
-    return new ReadableStream<Uint8Array>({
-      start(controller) {
-        if (proc.stdout) {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: 'stdout', data: proc.stdout, processId: id, timestamp: new Date().toISOString() })}\n\n`
-            )
-          );
-        }
-        if (proc.stderr) {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: 'stderr', data: proc.stderr, processId: id, timestamp: new Date().toISOString() })}\n\n`
-            )
-          );
-        }
-        if (proc.status !== 'running') {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: 'exit', exitCode: proc.exitCode, processId: id, timestamp: new Date().toISOString() })}\n\n`
-            )
-          );
-          controller.close();
-          return;
-        }
-
-        const listener = (type: 'stdout' | 'stderr', data: string) => {
-          try {
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({ type, data, processId: id, timestamp: new Date().toISOString() })}\n\n`
-              )
-            );
-          } catch {
-            /* Stream closed */
-          }
-        };
-        proc.outputListeners.add(listener);
-
-        const statusListener = (status: string) => {
-          if (['completed', 'failed', 'killed', 'error'].includes(status)) {
-            try {
-              controller.enqueue(
-                encoder.encode(
-                  `data: ${JSON.stringify({ type: 'exit', exitCode: proc.exitCode, processId: id, timestamp: new Date().toISOString() })}\n\n`
-                )
-              );
-              controller.close();
-            } catch {
-              /* Stream closed */
-            }
-            proc.outputListeners.delete(listener);
-            proc.statusListeners.delete(statusListener);
-          }
-        };
-        proc.statusListeners.add(statusListener);
-      }
-    });
   }
 }
 

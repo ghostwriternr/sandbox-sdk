@@ -10,12 +10,10 @@ import type {
   Logger,
   SandboxAPI,
   SandboxBackupAPI,
-  SandboxCommandsAPI,
   SandboxControlCallback,
   SandboxFilesAPI,
   SandboxGitAPI,
   SandboxPortsAPI,
-  SandboxProcessesAPI,
   SandboxUtilsAPI,
   SandboxWatchAPI
 } from '@repo/shared';

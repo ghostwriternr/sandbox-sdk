@@ -1,9 +1,9 @@
 /**
  * Sandbox control client implementation backed by direct capnweb RPC calls.
  *
- * The server exposes each domain (commands, files, processes, etc.) as a
+ * The server exposes each domain (sessions, files, etc.) as a
  * nested RpcTarget. capnweb returns typed stubs for these so the client
- * can use `rpc.commands`, `rpc.files`, etc. directly without any
+ * can use `rpc.sessions`, `rpc.files`, etc. directly without any
  * per-method boilerplate.
  *
  * Manages its own connection lifecycle: creates a fresh ContainerControlConnection
@@ -32,7 +32,7 @@
  *     `imports = 2` for its lifetime.
  *
  *   - **Returned ReadableStream.** When the peer (the container) returns a
- *     `ReadableStream` from an RPC method (e.g. `processes.streamProcessLogs`),
+ *     `ReadableStream` from an RPC method (e.g. `files.readFileStream`),
  *     capnweb serializes it via `createPipe()`: the *server* allocates an
  *     import slot, pumps `readable.pipeTo(writable)` over the wire, and
  *     only releases the slot in `pipeTo().finally(() => hook.dispose())`
@@ -47,7 +47,7 @@
  *
  * The practical consequence for sleepAfter: the per-call promise lifecycle
  * is *not* a reliable signal of "the container is done with this work".
- * `processes.streamProcessLogs(...)` resolves in milliseconds with a stream
+ * `files.readFileStream(...)` resolves in milliseconds with a stream
  * reference, but the container then writes to that stream for seconds. The
  * only signal that survives across the promise boundary is the export
  * entry — i.e. `getStats()`.
@@ -72,12 +72,11 @@
 import type {
   Logger,
   SandboxBackupAPI,
-  SandboxCommandsAPI,
   SandboxExtensionsAPI,
   SandboxFilesAPI,
   SandboxGitAPI,
   SandboxPortsAPI,
-  SandboxProcessesAPI,
+  SandboxSessionsAPI,
   SandboxTerminalsAPI,
   SandboxTunnelsAPI,
   SandboxUtilsAPI,
@@ -180,7 +179,7 @@ function isLocalSandboxError(
  * no longer in service.
  */
 export interface RPCTranslationContext {
-  /** Public operation name, e.g. `commands.execute` or `files.writeFile`. */
+  /** Public operation name, e.g. `sessions.exec` or `files.writeFile`. */
   operation?: string;
 }
 
@@ -672,12 +671,12 @@ export class ContainerControlClient {
   // subclasses. Explicit return types keep capnweb's recursive
   // type machinery out of .d.ts output.
 
-  get commands(): SandboxCommandsAPI {
+  get sessions(): SandboxSessionsAPI {
     return wrapStub(
-      this.getConnection().rpc().commands,
-      'commands',
+      this.getConnection().rpc().sessions,
+      'sessions',
       this.renewActivity
-    );
+    ) as unknown as SandboxSessionsAPI;
   }
   get files(): SandboxFilesAPI {
     return wrapStub(
@@ -685,13 +684,6 @@ export class ContainerControlClient {
       'files',
       this.renewActivity
     ) as unknown as SandboxFilesAPI;
-  }
-  get processes(): SandboxProcessesAPI {
-    return wrapStub(
-      this.getConnection().rpc().processes,
-      'processes',
-      this.renewActivity
-    );
   }
   get ports(): SandboxPortsAPI {
     return wrapStub(
