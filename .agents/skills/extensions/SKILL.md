@@ -56,11 +56,12 @@ class ClaudeCode extends SandboxExtension {
   }
 
   async ask(prompt: string, sessionId: string): Promise<string> {
-    const { stdout } = await this.client.commands.execute(
-      `claude -p ${shellEscape(prompt)}`,
-      sessionId
+    const process = await this.client.sessions.exec(
+      sessionId,
+      `claude -p ${shellEscape(prompt)}`
     );
-    return stdout;
+    const { stdout } = await process.output();
+    return new TextDecoder().decode(stdout);
   }
 }
 export const withClaudeCode = (s: SandboxLike) => new ClaudeCode(s);
@@ -125,7 +126,7 @@ export class Sandbox extends BaseSandbox<Env> {
 ## What the base gives you
 
 - `protected get client(): SandboxAPI` — the container control client. Use
-  `this.client.commands`, `this.client.files`, etc.
+  `this.client.sessions`, `this.client.files`, etc. (Note that SDK-only extensions must use current public client domains like `sessions`, `files`, `ports`, or `git`; there is no `commands` domain).
 - `protected sidecar<T extends object>(): Promise<T>` — provision + spawn
   the sidecar on demand and return its typed capnweb remote main. `T` is
   the sidecar's `SandboxSidecar` subclass shape. Each call reconnects

@@ -52,7 +52,11 @@ export type SandboxLike = {
  * // SDK-only
  * class Git extends SandboxExtension {
  *   constructor(s: SandboxLike) { super(s); }
- *   status(sid: string) { return this.client.commands.execute('git status', sid); }
+ *   async status(sid: string): Promise<string> {
+ *     const proc = await this.client.sessions.exec(sid, 'git status');
+ *     const { stdout } = await proc.output();
+ *     return new TextDecoder().decode(stdout);
+ *   }
  * }
  *
  * // Sidecar

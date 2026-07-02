@@ -51,36 +51,34 @@ describe('SandboxExtension', () => {
     vi.restoreAllMocks();
   });
 
-  class Commands extends SandboxExtension {
+  class DummyExtension extends SandboxExtension {
     // biome-ignore lint/complexity/noUselessConstructor: widens the protected base constructor
     constructor(sandbox: SandboxLike) {
       super(sandbox);
     }
     list() {
-      return (
-        this.client as unknown as { commands: { exec: () => unknown } }
-      ).commands.exec();
+      return this.client.sessions.list();
     }
   }
 
   it('captures the sandbox without exposing it as an own property (RPC-safe)', () => {
     const sandbox = { client: {} } as unknown as SandboxLike;
-    const ext = new Commands(sandbox);
+    const ext = new DummyExtension(sandbox);
 
     expect(Object.getOwnPropertyNames(ext)).not.toContain('sandbox');
     expect(Object.getOwnPropertyNames(ext)).not.toContain('client');
     expect(Object.keys(ext)).toHaveLength(0);
   });
 
-  it('exposes the control client to subclasses lazily', () => {
-    const exec = vi.fn(() => 'ok');
+  it('exposes the control client to subclasses lazily', async () => {
+    const list = vi.fn().mockResolvedValue('ok');
     const sandbox = {
-      client: { commands: { exec } }
+      client: { sessions: { list } }
     } as unknown as SandboxLike;
-    const ext = new Commands(sandbox);
+    const ext = new DummyExtension(sandbox);
 
-    expect(ext.list()).toBe('ok');
-    expect(exec).toHaveBeenCalledTimes(1);
+    await expect(ext.list()).resolves.toBe('ok');
+    expect(list).toHaveBeenCalledTimes(1);
   });
 
   it('throws a helpful error if sidecar methods are used without a package', async () => {
