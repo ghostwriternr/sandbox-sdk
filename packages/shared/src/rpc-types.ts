@@ -17,6 +17,9 @@ import type {
   CheckChangesRequest,
   CheckChangesResult,
   DeleteFileResult,
+  ExecOptions,
+  ExecOutput,
+  ExecResult,
   FileEncoding,
   FileExistsResult,
   GitCheckoutResult,
@@ -25,23 +28,20 @@ import type {
   MkdirResult,
   MoveFileResult,
   PortWatchRequest,
-  ProcessCleanupResult,
-  ProcessInfoResult,
-  ProcessKillResult,
-  ProcessListResult,
-  ProcessLogsResult,
-  ProcessStartResult,
   ReadFileResult,
   ReadFileStreamResult,
   RenameFileResult,
+  SandboxCommand,
+  SessionCreateResult,
+  SessionDeleteResult,
+  SessionListResult,
   WatchRequest,
   WriteFileResult
 } from './types.js';
 
 export interface SandboxAPI {
-  commands: SandboxCommandsAPI;
+  sessions: SandboxSessionsAPI;
   files: SandboxFilesAPI;
-  processes: SandboxProcessesAPI;
   ports: SandboxPortsAPI;
   git: SandboxGitAPI;
   utils: SandboxUtilsAPI;
@@ -52,26 +52,26 @@ export interface SandboxAPI {
   extensions: SandboxExtensionsAPI;
 }
 
-export interface CommandExecuteOptions {
-  sessionId?: string;
-  timeoutMs?: number;
-  env?: Record<string, string | undefined>;
-  cwd?: string;
-  origin?: 'user' | 'internal';
+export interface SessionExecStartResult {
+  processId: string;
+  pid: number;
+  stdin: WritableStream<Uint8Array> | null;
+  stdout: ReadableStream<Uint8Array> | null;
+  stderr: ReadableStream<Uint8Array> | null;
+  exitCode: Promise<number>;
+  output(): Promise<ExecOutput>;
+  kill(signal?: number): Promise<void> | void;
 }
 
-export interface SandboxCommandsAPI {
-  execute(
-    command: string,
-    options?: CommandExecuteOptions
-  ): Promise<{
-    success: boolean;
-    exitCode: number;
-    stdout: string;
-    stderr: string;
-    command: string;
-    timestamp: string;
-  }>;
+export interface SandboxSessionsAPI {
+  create(options?: SessionCreateOptions): Promise<SessionCreateResult>;
+  delete(sessionId: string): Promise<SessionDeleteResult>;
+  list(): Promise<SessionListResult>;
+  exec(
+    sessionId: string,
+    command: SandboxCommand,
+    options?: ExecOptions
+  ): Promise<SessionExecStartResult>;
 }
 
 export interface FileSessionOptions {
@@ -139,29 +139,6 @@ export interface SandboxFilesAPI {
   mkdir(path: string, options?: MkdirOptions): Promise<MkdirResult>;
   listFiles(path: string, options?: ListFilesOptions): Promise<ListFilesResult>;
   exists(path: string, options?: FileSessionOptions): Promise<FileExistsResult>;
-}
-
-export interface ProcessStartOptions {
-  sessionId?: string;
-  processId?: string;
-  timeoutMs?: number;
-  env?: Record<string, string | undefined>;
-  cwd?: string;
-  encoding?: string;
-  autoCleanup?: boolean;
-}
-
-export interface SandboxProcessesAPI {
-  startProcess(
-    command: string,
-    options?: ProcessStartOptions
-  ): Promise<ProcessStartResult>;
-  listProcesses(): Promise<ProcessListResult>;
-  getProcess(id: string): Promise<ProcessInfoResult>;
-  killProcess(id: string): Promise<ProcessKillResult>;
-  killAllProcesses(): Promise<ProcessCleanupResult>;
-  getProcessLogs(id: string): Promise<ProcessLogsResult>;
-  streamProcessLogs(id: string): Promise<ReadableStream<Uint8Array>>;
 }
 
 export interface SandboxPortsAPI {

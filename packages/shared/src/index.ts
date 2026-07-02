@@ -73,7 +73,6 @@ export type {
 export type {
   BackupCreateArchiveOptions,
   BackupRestoreArchiveOptions,
-  CommandExecuteOptions,
   EnsureNamedTunnelRunRequest,
   EnsureQuickTunnelRunRequest,
   EnsureTunnelRunRequest,
@@ -87,7 +86,6 @@ export type {
   MkdirOptions,
   NamedTunnelInfo,
   NamedTunnelRunSnapshot,
-  ProcessStartOptions,
   QuickTunnelInfo,
   QuickTunnelRunSnapshot,
   ReadFileBinaryOptions,
@@ -95,18 +93,18 @@ export type {
   ReadFileStreamOptions,
   SandboxAPI,
   SandboxBackupAPI,
-  SandboxCommandsAPI,
   SandboxControlCallback,
   SandboxExtensionsAPI,
   SandboxFilesAPI,
   SandboxGitAPI,
   SandboxPortsAPI,
-  SandboxProcessesAPI,
+  SandboxSessionsAPI,
   SandboxTerminalsAPI,
   SandboxTunnelsAPI,
   SandboxUtilsAPI,
   SandboxWatchAPI,
   SessionCreateOptions,
+  SessionExecStartResult,
   StopTunnelRunRequest,
   StopTunnelRunResult,
   TunnelInfo,
@@ -129,7 +127,6 @@ export type {
   // Backup types
   BackupCompressionOptions,
   BackupOptions,
-  BaseExecOptions,
   // Bucket mounting types
   BucketCredentials,
   BucketProvider,
@@ -140,8 +137,8 @@ export type {
   DirectoryBackup,
   Disposable,
   EnvSetResult,
-  ExecEvent,
   ExecOptions,
+  ExecOutput,
   ExecResult,
   ExecutionSession,
   // File streaming types
@@ -161,7 +158,6 @@ export type {
   ListFilesOptions,
   ListFilesResult,
   LocalMountBucketOptions,
-  LogEvent,
   MkdirResult,
   MountBucketOptions,
   MoveFileResult,
@@ -170,42 +166,26 @@ export type {
   PortExposeResult,
   PortWatchEvent,
   PortWatchRequest,
-  Process,
-  ProcessCleanupResult,
-  ProcessInfoResult,
-  ProcessKillResult,
-  ProcessListResult,
-  ProcessLogsResult,
-  ProcessOptions,
-  ProcessQueryOptions,
-  // Process management result types
-  ProcessStartResult,
-  ProcessStatus,
   R2BindingMountBucketOptions,
   ReadFileResult,
   ReadFileStreamResult,
   RemoteMountBucketOptions,
   RenameFileResult,
   RestoreBackupResult,
+  SandboxCommand,
   // Sandbox configuration options
   SandboxOptions,
+  SandboxProcess,
   // Session management result types
   SessionCreateResult,
   SessionDeleteResult,
+  SessionListResult,
   SessionOptions,
   ShutdownResult,
-  // Process readiness types
-  WaitForExitResult,
-  WaitForLogResult,
   WaitForPortOptions,
   // File watch types
   WatchOptions,
   WatchRequest,
   WriteFileResult
 } from './types.js';
-export {
-  isExecResult,
-  isProcess,
-  isProcessStatus,
-  isTerminalStatus
-} from './types.js';
+export { isExecResult } from './types.js';

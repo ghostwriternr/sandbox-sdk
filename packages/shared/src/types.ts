@@ -1,4 +1,5 @@
 import type { SandboxTerminal, TerminalOptions } from './pty-types';
+import type { GitCheckoutOptions } from './rpc-types.js';
 
 /**
  * Represents a disposable resource with a cleanup function.
@@ -8,100 +9,46 @@ export interface Disposable {
   dispose(): void;
 }
 
-// Base execution options shared across command types
-export interface BaseExecOptions {
-  /**
-   * Maximum execution time in milliseconds
-   */
+export type SandboxCommand = string | string[];
+
+export interface ExecOptions {
   timeout?: number;
-
-  /**
-   * Environment variables for this command invocation.
-   * Values temporarily override session-level/container-level env for the
-   * duration of the command but do not persist after it completes.
-   * Undefined values are skipped (treated as "not configured").
-   */
   env?: Record<string, string | undefined>;
-
-  /**
-   * Working directory for command execution
-   */
   cwd?: string;
-
-  /**
-   * Text encoding for output (default: 'utf8')
-   */
   encoding?: string;
-}
-
-// Command execution types
-export interface ExecOptions extends BaseExecOptions {
-  /**
-   * Whether this command was initiated by the user or by internal
-   * infrastructure (backup, bucket mount, env setup, etc.).
-   * Defaults to 'user' when omitted.
-   */
+  stdin?: ReadableStream<Uint8Array> | string | 'pipe';
+  stdout?: 'pipe' | 'ignore';
+  stderr?: 'pipe' | 'ignore' | 'combined';
+  user?: string;
   origin?: 'user' | 'internal';
 }
 
-export interface ExecResult {
-  /**
-   * Whether the command succeeded (exitCode === 0)
-   */
-  success: boolean;
-
-  /**
-   * Process exit code
-   */
+export interface ExecOutput {
+  stdout: ArrayBuffer;
+  stderr: ArrayBuffer;
   exitCode: number;
+}
 
-  /**
-   * Standard output content
-   */
+export interface ExecResult {
+  success: boolean;
+  exitCode: number;
   stdout: string;
-
-  /**
-   * Standard error content
-   */
   stderr: string;
-
-  /**
-   * Command that was executed
-   */
   command: string;
-
-  /**
-   * Execution duration in milliseconds
-   */
   duration: number;
-
-  /**
-   * ISO timestamp when command started
-   */
   timestamp: string;
-
-  /**
-   * Session ID if provided
-   */
   sessionId?: string;
 }
 
-/**
- * Result from waiting for a log pattern
- */
-export interface WaitForLogResult {
-  /** The log line that matched */
-  line: string;
-  /** Regex capture groups (if condition was a RegExp) */
-  match?: RegExpMatchArray;
-}
-
-/**
- * Result from waiting for process exit
- */
-export interface WaitForExitResult {
-  /** Process exit code */
-  exitCode: number;
+export interface SandboxProcess {
+  readonly stdin: WritableStream<Uint8Array> | null;
+  readonly stdout: ReadableStream<Uint8Array> | null;
+  readonly stderr: ReadableStream<Uint8Array> | null;
+  readonly pid: number;
+  readonly exitCode: Promise<number>;
+  output(): Promise<ExecOutput>;
+  kill(signal?: number): void | Promise<void>;
+  waitForPort(port: number, options?: WaitForPortOptions): Promise<void>;
 }
 
 /**
@@ -187,192 +134,6 @@ export interface PortWatchEvent {
   exitCode?: number;
   /** Error message (for 'error' events) */
   error?: string;
-}
-
-// Background process types
-export interface ProcessQueryOptions {
-  /**
-   * Optional session ID used to bind returned process handles to an explicit session.
-   */
-  sessionId?: string;
-}
-
-export interface ProcessOptions extends BaseExecOptions {
-  /**
-   * Optional session ID to run the background process in.
-   *
-   * When omitted, the process starts without persistent session state.
-   */
-  sessionId?: string;
-
-  /**
-   * Custom process ID for later reference
-   * If not provided, a UUID will be generated
-   */
-  processId?: string;
-
-  /**
-   * Automatically cleanup process record after exit (default: true)
-   */
-  autoCleanup?: boolean;
-
-  /**
-   * Callback when process exits
-   */
-  onExit?: (code: number | null) => void;
-
-  /**
-   * Callback for real-time output (background processes)
-   */
-  onOutput?: (stream: 'stdout' | 'stderr', data: string) => void;
-
-  /**
-   * Callback when process starts successfully
-   */
-  onStart?: (process: Process) => void;
-
-  /**
-   * Callback for process errors
-   */
-  onError?: (error: Error) => void;
-}
-
-export type ProcessStatus =
-  | 'starting' // Process is being initialized
-  | 'running' // Process is actively running
-  | 'completed' // Process exited successfully (code 0)
-  | 'failed' // Process exited with non-zero code
-  | 'killed' // Process was terminated by signal
-  | 'error'; // Process failed to start or encountered error
-
-/**
- * Check if a process status indicates the process has terminated
- */
-export function isTerminalStatus(status: ProcessStatus): boolean {
-  return (
-    status === 'completed' ||
-    status === 'failed' ||
-    status === 'killed' ||
-    status === 'error'
-  );
-}
-
-export interface Process {
-  /**
-   * Unique process identifier
-   */
-  readonly id: string;
-
-  /**
-   * System process ID (if available and running)
-   */
-  readonly pid?: number;
-
-  /**
-   * Command that was executed
-   */
-  readonly command: string;
-
-  /**
-   * Current process status
-   */
-  readonly status: ProcessStatus;
-
-  /**
-   * When the process was started
-   */
-  readonly startTime: Date;
-
-  /**
-   * When the process ended (if completed)
-   */
-  readonly endTime?: Date;
-
-  /**
-   * Process exit code (if completed)
-   */
-  readonly exitCode?: number;
-
-  /**
-   * Session ID if provided
-   */
-  readonly sessionId?: string;
-
-  /**
-   * Kill the process
-   */
-  kill(): Promise<void>;
-
-  /**
-   * Get current process status (refreshed)
-   */
-  getStatus(): Promise<ProcessStatus>;
-
-  /**
-   * Get accumulated logs
-   */
-  getLogs(): Promise<{ stdout: string; stderr: string }>;
-
-  /**
-   * Wait for a log pattern to appear in process output
-   *
-   * @example
-   * const proc = await sandbox.startProcess("python train.py");
-   * await proc.waitForLog("Epoch 1 complete");
-   * await proc.waitForLog(/Epoch (\d+) complete/);
-   */
-  waitForLog(
-    pattern: string | RegExp,
-    timeout?: number
-  ): Promise<WaitForLogResult>;
-
-  /**
-   * Wait for a port to become ready
-   *
-   * @example
-   * // Wait for HTTP endpoint to return 200-399
-   * const proc = await sandbox.startProcess("npm run dev");
-   * await proc.waitForPort(3000);
-   *
-   * @example
-   * // Wait for specific health endpoint
-   * await proc.waitForPort(3000, { path: '/health', status: 200 });
-   *
-   * @example
-   * // TCP-only check (just verify port is accepting connections)
-   * await proc.waitForPort(5432, { mode: 'tcp' });
-   */
-  waitForPort(port: number, options?: WaitForPortOptions): Promise<void>;
-
-  /**
-   * Wait for the process to exit
-   *
-   * Returns the exit code. Use getProcessLogs() or streamProcessLogs()
-   * to retrieve output after the process exits.
-   */
-  waitForExit(timeout?: number): Promise<WaitForExitResult>;
-}
-
-// Streaming event types
-export interface ExecEvent {
-  type: 'start' | 'stdout' | 'stderr' | 'complete' | 'error';
-  timestamp: string;
-  data?: string;
-  command?: string;
-  exitCode?: number;
-  result?: ExecResult;
-  error?: string;
-  sessionId?: string;
-  pid?: number; // Present on 'start' event
-}
-
-export interface LogEvent {
-  type: 'stdout' | 'stderr' | 'exit' | 'error';
-  timestamp: string;
-  data: string;
-  processId: string;
-  sessionId?: string;
-  exitCode?: number;
 }
 
 // Session management types
@@ -819,66 +580,6 @@ export type CheckChangesResult =
       timestamp: string;
     };
 
-// Process management result types
-export interface ProcessStartResult {
-  success: boolean;
-  processId: string;
-  pid?: number;
-  command: string;
-  timestamp: string;
-}
-
-export interface ProcessListResult {
-  success: boolean;
-  processes: Array<{
-    id: string;
-    pid?: number;
-    command: string;
-    status: ProcessStatus;
-    startTime: string;
-    endTime?: string;
-    exitCode?: number;
-  }>;
-  timestamp: string;
-}
-
-export interface ProcessInfoResult {
-  success: boolean;
-  process: {
-    id: string;
-    pid?: number;
-    command: string;
-    status: ProcessStatus;
-    startTime: string;
-    endTime?: string;
-    exitCode?: number;
-  };
-  timestamp: string;
-}
-
-export interface ProcessKillResult {
-  success: boolean;
-  processId: string;
-  signal?: string;
-  timestamp: string;
-}
-
-export interface ProcessLogsResult {
-  success: boolean;
-  processId: string;
-  stdout: string;
-  stderr: string;
-  timestamp: string;
-}
-
-export interface ProcessCleanupResult {
-  success: boolean;
-  message?: string;
-  killedCount?: number;
-  cleanedCount: number;
-  timestamp: string;
-}
-
 // Session management result types
 export interface SessionCreateResult {
   success: boolean;
@@ -891,6 +592,17 @@ export interface SessionCreateResult {
 export interface SessionDeleteResult {
   success: boolean;
   sessionId: string;
+  timestamp: string;
+}
+
+export interface SessionListResult {
+  success: boolean;
+  sessions: Array<{
+    id: string;
+    name?: string;
+    cwd?: string;
+    createdAt?: string;
+  }>;
   timestamp: string;
 }
 
@@ -919,31 +631,9 @@ export interface ShutdownResult {
 }
 
 export interface ExecutionSession {
-  /** Unique session identifier */
   readonly id: string;
+  exec(command: SandboxCommand, options?: ExecOptions): Promise<SandboxProcess>;
 
-  // Command execution
-  exec(command: string, options?: ExecOptions): Promise<ExecResult>;
-
-  // Background process management
-  startProcess(command: string, options?: ProcessOptions): Promise<Process>;
-  listProcesses(options?: ProcessQueryOptions): Promise<Process[]>;
-  getProcess(
-    id: string,
-    options?: ProcessQueryOptions
-  ): Promise<Process | null>;
-  killProcess(id: string): Promise<void>;
-  killAllProcesses(): Promise<number>;
-  cleanupCompletedProcesses(): Promise<number>;
-  getProcessLogs(
-    id: string
-  ): Promise<{ stdout: string; stderr: string; processId: string }>;
-  streamProcessLogs(
-    processId: string,
-    options?: { signal?: AbortSignal }
-  ): Promise<ReadableStream<Uint8Array>>;
-
-  // File operations
   writeFile(
     path: string,
     content: string | ReadableStream<Uint8Array>,
@@ -952,19 +642,19 @@ export interface ExecutionSession {
   readFile(
     path: string,
     options: { encoding: 'none' }
-  ): Promise<ReadFileStreamResult>;
+  ): Promise<ReadableStream<Uint8Array>>;
   readFile(
     path: string,
     options?: { encoding?: Exclude<FileEncoding, 'none'> }
-  ): Promise<ReadFileResult>;
+  ): Promise<string>;
   readFileStream(path: string): Promise<ReadableStream<Uint8Array>>;
   watch(
     path: string,
-    options?: Omit<WatchOptions, 'sessionId'>
+    options?: WatchOptions
   ): Promise<ReadableStream<Uint8Array>>;
   checkChanges(
     path: string,
-    options?: Omit<CheckChangesOptions, 'sessionId'>
+    options?: WatchOptions
   ): Promise<CheckChangesResult>;
   mkdir(path: string, options?: { recursive?: boolean }): Promise<MkdirResult>;
   deleteFile(path: string): Promise<DeleteFileResult>;
@@ -975,34 +665,13 @@ export interface ExecutionSession {
   ): Promise<MoveFileResult>;
   listFiles(path: string, options?: ListFilesOptions): Promise<ListFilesResult>;
   exists(path: string): Promise<FileExistsResult>;
-
-  // Git operations
   gitCheckout(
     repoUrl: string,
-    options?: {
-      branch?: string;
-      targetDir?: string;
-      /** Clone depth for shallow clones (e.g., 1 for latest commit only) */
-      depth?: number;
-      /** Maximum wall-clock time for the git clone subprocess in milliseconds */
-      cloneTimeoutMs?: number;
-    }
+    options?: Omit<GitCheckoutOptions, 'sessionId'>
   ): Promise<GitCheckoutResult>;
-
-  // Environment management
   setEnvVars(envVars: Record<string, string | undefined>): Promise<void>;
-
-  // Bucket mounting operations
-  mountBucket(
-    bucket: string,
-    mountPath: string,
-    options: MountBucketOptions
-  ): Promise<void>;
-  unmountBucket(mountPath: string): Promise<void>;
-
-  // Backup operations
-  createBackup(options: BackupOptions): Promise<DirectoryBackup>;
-  restoreBackup(backup: DirectoryBackup): Promise<RestoreBackupResult>;
+  getEnvVars(): Promise<Record<string, string>>;
+  delete(): Promise<SessionDeleteResult>;
 }
 
 // Backup types
@@ -1235,29 +904,7 @@ export type MountBucketOptions =
 // Main Sandbox interface
 export interface ISandbox {
   // Command execution
-  exec(command: string, options?: ExecOptions): Promise<ExecResult>;
-
-  // Background process management
-  startProcess(command: string, options?: ProcessOptions): Promise<Process>;
-  listProcesses(options?: ProcessQueryOptions): Promise<Process[]>;
-  getProcess(
-    id: string,
-    options?: ProcessQueryOptions
-  ): Promise<Process | null>;
-  killProcess(id: string): Promise<void>;
-  killAllProcesses(): Promise<number>;
-
-  // Streaming operations
-  streamProcessLogs(
-    processId: string,
-    options?: { signal?: AbortSignal }
-  ): Promise<ReadableStream<Uint8Array>>;
-
-  // Utility methods
-  cleanupCompletedProcesses(): Promise<number>;
-  getProcessLogs(
-    id: string
-  ): Promise<{ stdout: string; stderr: string; processId: string }>;
+  exec(command: SandboxCommand, options?: ExecOptions): Promise<SandboxProcess>;
 
   // File operations
   writeFile(
@@ -1268,11 +915,11 @@ export interface ISandbox {
   readFile(
     path: string,
     options: { encoding: 'none'; sessionId?: string }
-  ): Promise<ReadFileStreamResult>;
+  ): Promise<ReadableStream<Uint8Array>>;
   readFile(
     path: string,
     options?: { encoding?: Exclude<FileEncoding, 'none'>; sessionId?: string }
-  ): Promise<ReadFileResult>;
+  ): Promise<string>;
   readFileStream(
     path: string,
     options?: { sessionId?: string }
@@ -1312,15 +959,7 @@ export interface ISandbox {
   // Git operations
   gitCheckout(
     repoUrl: string,
-    options?: {
-      branch?: string;
-      targetDir?: string;
-      sessionId?: string;
-      /** Clone depth for shallow clones (e.g., 1 for latest commit only) */
-      depth?: number;
-      /** Maximum wall-clock time for the git clone subprocess in milliseconds */
-      cloneTimeoutMs?: number;
-    }
+    options?: GitCheckoutOptions
   ): Promise<GitCheckoutResult>;
 
   // Environment management
@@ -1367,24 +1006,4 @@ export function isExecResult(value: any): value is ExecResult {
     typeof value.stdout === 'string' &&
     typeof value.stderr === 'string'
   );
-}
-
-export function isProcess(value: any): value is Process {
-  return (
-    value &&
-    typeof value.id === 'string' &&
-    typeof value.command === 'string' &&
-    typeof value.status === 'string'
-  );
-}
-
-export function isProcessStatus(value: string): value is ProcessStatus {
-  return [
-    'starting',
-    'running',
-    'completed',
-    'failed',
-    'killed',
-    'error'
-  ].includes(value);
 }
