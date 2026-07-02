@@ -162,13 +162,11 @@ function generateCapabilityToken(): string {
 async function ensureCodexRunning(
   sandbox: ReturnType<typeof getSandbox>
 ): Promise<string> {
-  const procs = await sandbox.listProcesses();
-  const existing = procs.find((p) => p.id === 'codex-app-server');
-  if (
-    existing &&
-    (existing.status === 'running' || existing.status === 'starting')
-  )
+  const checkPort = await sandbox.exec(`nc -z 127.0.0.1 ${CODEX_WS_PORT}`);
+  const checkResult = await checkPort.output();
+  if (checkResult.exitCode === 0) {
     return (await sandbox.readFile(CODEX_WS_TOKEN_FILE)).content;
+  }
 
   const codexWsToken = generateCapabilityToken();
 
@@ -178,9 +176,8 @@ async function ensureCodexRunning(
   });
   await sandbox.writeFile(CODEX_WS_TOKEN_FILE, codexWsToken);
 
-  const proc = await sandbox.startProcess(
-    `bash -lc "codex app-server --listen ws://0.0.0.0:${CODEX_WS_PORT} --ws-auth capability-token --ws-token-file ${CODEX_WS_TOKEN_FILE}"`,
-    { processId: 'codex-app-server' }
+  const proc = await sandbox.exec(
+    `bash -lc "codex app-server --listen ws://0.0.0.0:${CODEX_WS_PORT} --ws-auth capability-token --ws-token-file ${CODEX_WS_TOKEN_FILE}"`
   );
   await proc.waitForPort(CODEX_WS_PORT, { mode: 'tcp' });
   return codexWsToken;

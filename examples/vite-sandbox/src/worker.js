@@ -19,17 +19,13 @@ export default {
 async function handleAPISandboxRoute(env) {
   const sandbox = getSandbox(env.Sandbox, 'vite-sandbox');
 
-  const proc = await sandbox.getProcess('vite-dev-server');
-  if (!proc) {
-    const proc = await sandbox.startProcess('npm run dev', {
-      processId: 'vite-dev-server',
-      cwd: '/app',
-      env: {
-        VITE_PORT: `${VITE_PORT}`
-      }
-    });
-    await proc.waitForPort(VITE_PORT);
-  }
+  const proc = await sandbox.exec('npm run dev', {
+    cwd: '/app',
+    env: {
+      VITE_PORT: `${VITE_PORT}`
+    }
+  });
+  await proc.waitForPort(VITE_PORT);
 
   try {
     const tunnel = await sandbox.tunnels.get(VITE_PORT);

@@ -1,6 +1,6 @@
 import type { Config } from '@opencode-ai/sdk/v2';
 import type { OpencodeClient } from '@opencode-ai/sdk/v2/client';
-import { createLogger, type Logger, type Process } from '@repo/shared';
+import { createLogger, type Logger, type SandboxProcess } from '@repo/shared';
 import type { Sandbox } from '../sandbox';
 import type { OpencodeOptions, OpencodeResult, OpencodeServer } from './types';
 import { OpencodeStartupError } from './types';
@@ -48,122 +48,6 @@ async function ensureSdkLoaded(): Promise<void> {
 }
 
 /**
- * Find an existing OpenCode server process running on the specified port.
- * Returns the process if found and still active, null otherwise.
- * Matches by the serve command pattern since directory prefix may vary.
- */
-async function findExistingOpencodeProcess(
-  sandbox: Sandbox<unknown>,
-  port: number
-): Promise<Process | null> {
-  const processes = await sandbox.listProcesses();
-  const serveCommand = OPENCODE_SERVE(port);
-
-  for (const proc of processes) {
-    // Match commands that contain the serve command (with or without cd prefix)
-    if (proc.command.includes(serveCommand)) {
-      if (proc.status === 'starting' || proc.status === 'running') {
-        return proc;
-      }
-    }
-  }
-
-  return null;
-}
-
-/**
- * Ensures OpenCode server is running in the container.
- * Reuses existing process if one is already running on the specified port.
- * Handles concurrent startup attempts gracefully by retrying on failure.
- * Returns the process handle.
- */
-async function ensureOpencodeServer(
-  sandbox: Sandbox<unknown>,
-  port: number,
-  directory?: string,
-  config?: Config,
-  customEnv?: Record<string, string>
-): Promise<Process> {
-  // Check if OpenCode is already running on this port
-  const existingProcess = await findExistingOpencodeProcess(sandbox, port);
-  if (existingProcess) {
-    // Reuse existing process - wait for it to be ready if still starting
-    if (existingProcess.status === 'starting') {
-      getLogger().debug('Found starting OpenCode process, waiting for ready', {
-        port,
-        processId: existingProcess.id
-      });
-      try {
-        await existingProcess.waitForPort(port, {
-          mode: 'http',
-          path: '/path',
-          status: 200,
-          timeout: OPENCODE_STARTUP_TIMEOUT_MS
-        });
-      } catch (e) {
-        const logs = await existingProcess.getLogs();
-        throw new OpencodeStartupError(
-          `OpenCode server failed to start. Stderr: ${logs.stderr || '(empty)'}`,
-          { port, stderr: logs.stderr, command: existingProcess.command },
-          { cause: e }
-        );
-      }
-    }
-    getLogger().debug('Reusing existing OpenCode process', {
-      port,
-      processId: existingProcess.id
-    });
-    return existingProcess;
-  }
-
-  // Try to start a new OpenCode server
-  try {
-    return await startOpencodeServer(
-      sandbox,
-      port,
-      directory,
-      config,
-      customEnv
-    );
-  } catch (startupError) {
-    // Startup failed - check if another concurrent request started the server
-    // This handles the race condition where multiple requests try to start simultaneously
-    const retryProcess = await findExistingOpencodeProcess(sandbox, port);
-    if (retryProcess) {
-      getLogger().debug(
-        'Startup failed but found concurrent process, reusing',
-        {
-          port,
-          processId: retryProcess.id
-        }
-      );
-      // Wait for the concurrent server to be ready
-      if (retryProcess.status === 'starting') {
-        try {
-          await retryProcess.waitForPort(port, {
-            mode: 'http',
-            path: '/path',
-            status: 200,
-            timeout: OPENCODE_STARTUP_TIMEOUT_MS
-          });
-        } catch (e) {
-          const logs = await retryProcess.getLogs();
-          throw new OpencodeStartupError(
-            `OpenCode server failed to start. Stderr: ${logs.stderr || '(empty)'}`,
-            { port, stderr: logs.stderr, command: retryProcess.command },
-            { cause: e }
-          );
-        }
-      }
-      return retryProcess;
-    }
-
-    // No concurrent server found - the failure was genuine
-    throw startupError;
-  }
-}
-
-/**
  * Internal function to start a new OpenCode server process.
  */
 async function startOpencodeServer(
@@ -172,7 +56,7 @@ async function startOpencodeServer(
   directory?: string,
   config?: Config,
   customEnv?: Record<string, string>
-): Promise<Process> {
+): Promise<SandboxProcess> {
   getLogger().info('Starting OpenCode server', { port, directory });
 
   // Pass config via OPENCODE_CONFIG_CONTENT and also extract API keys to env vars
@@ -234,7 +118,7 @@ async function startOpencodeServer(
   }
 
   const command = buildOpencodeCommand(port, directory);
-  const process = await sandbox.startProcess(command, {
+  const process = await sandbox.exec(command, {
     env: Object.keys(env).length > 0 ? env : undefined
   });
 
@@ -248,18 +132,16 @@ async function startOpencodeServer(
     });
     getLogger().info('OpenCode server started successfully', {
       port,
-      processId: process.id
+      pid: process.pid
     });
   } catch (e) {
-    const logs = await process.getLogs();
     const error = e instanceof Error ? e : undefined;
     getLogger().error('OpenCode server failed to start', error, {
-      port,
-      stderr: logs.stderr
+      port
     });
     throw new OpencodeStartupError(
-      `OpenCode server failed to start. Stderr: ${logs.stderr || '(empty)'}`,
-      { port, stderr: logs.stderr, command },
+      `OpenCode server failed to start.`,
+      { port, stderr: '', command },
       { cause: e }
     );
   }
@@ -273,52 +155,16 @@ async function startOpencodeServer(
  * This function manages the server lifecycle only - use `createOpencode()` if you
  * also need a typed SDK client for programmatic access.
  *
- * If an OpenCode server is already running on the specified port, this function
- * will reuse it instead of starting a new one.
- *
  * @param sandbox - The Sandbox instance to run OpenCode in
  * @param options - Configuration options
  * @returns Promise resolving to server handle { port, url, close() }
- *
- * @example
- * ```typescript
- * import { getSandbox } from '@cloudflare/sandbox'
- * import { createOpencodeServer } from '@cloudflare/sandbox/opencode'
- *
- * const sandbox = getSandbox(env.Sandbox, 'my-agent')
- * const server = await createOpencodeServer(sandbox, {
- *   directory: '/home/user/my-project',
- *   config: {
- *     provider: {
- *       anthropic: {
- *         options: { apiKey: env.ANTHROPIC_KEY }
- *       },
- *       // Or use Cloudflare AI Gateway (with unified billing, no provider keys needed).
- *       // 'cloudflare-ai-gateway': {
- *       //   options: {
- *       //     accountId: env.CF_ACCOUNT_ID,
- *       //     gatewayId: env.CF_GATEWAY_ID,
- *       //     apiToken: env.CF_API_TOKEN
- *       //   },
- *       //   models: { 'anthropic/claude-sonnet-4-5-20250929': {} }
- *       // }
- *     }
- *   }
- * })
- *
- * // Proxy requests to the web UI
- * return sandbox.containerFetch(request, server.port)
- *
- * // When done
- * await server.close()
- * ```
  */
 export async function createOpencodeServer(
   sandbox: Sandbox<unknown>,
   options?: OpencodeOptions
 ): Promise<OpencodeServer> {
   const port = options?.port ?? DEFAULT_PORT;
-  const process = await ensureOpencodeServer(
+  const process = await startOpencodeServer(
     sandbox,
     port,
     options?.directory,
@@ -329,7 +175,9 @@ export async function createOpencodeServer(
   return {
     port,
     url: `http://localhost:${port}`,
-    close: () => process.kill()
+    close: async () => {
+      await process.kill();
+    }
   };
 }
 
@@ -340,50 +188,9 @@ export async function createOpencodeServer(
  * Sandbox process management instead of Node.js spawn. The returned client uses
  * a custom fetch adapter to route requests through the Sandbox container.
  *
- * If an OpenCode server is already running on the specified port, this function
- * will reuse it instead of starting a new one.
- *
  * @param sandbox - The Sandbox instance to run OpenCode in
  * @param options - Configuration options
  * @returns Promise resolving to { client, server }
- *
- * @example
- * ```typescript
- * import { getSandbox } from '@cloudflare/sandbox'
- * import { createOpencode } from '@cloudflare/sandbox/opencode'
- *
- * const sandbox = getSandbox(env.Sandbox, 'my-agent')
- * const { client, server } = await createOpencode(sandbox, {
- *   directory: '/home/user/my-project',
- *   config: {
- *     provider: {
- *       anthropic: {
- *         options: { apiKey: env.ANTHROPIC_KEY }
- *       },
- *       // Or use Cloudflare AI Gateway (with unified billing, no provider keys needed).
- *       // 'cloudflare-ai-gateway': {
- *       //   options: {
- *       //     accountId: env.CF_ACCOUNT_ID,
- *       //     gatewayId: env.CF_GATEWAY_ID,
- *       //     apiToken: env.CF_API_TOKEN
- *       //   },
- *       //   models: { 'anthropic/claude-sonnet-4-5-20250929': {} }
- *       // }
- *     }
- *   },
- *   // Optional: Pass additional environment variables (e.g., for OTEL telemetry)
- *   env: {
- *     OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:4318',
- *     TRACEPARENT: '00-abc123-def456-01'
- *   }
- * })
- *
- * // Use the SDK client for programmatic access
- * const session = await client.session.create()
- *
- * // When done
- * await server.close()
- * ```
  */
 export async function createOpencode<TClient = OpencodeClient>(
   sandbox: Sandbox<unknown>,
@@ -437,37 +244,6 @@ export function proxyToOpencodeServer(
  * @param sandbox - The Sandbox instance running OpenCode
  * @param server - The OpenCode server handle from createOpencodeServer()
  * @returns Response from OpenCode or a redirect response
- *
- * @example
- * ```typescript
- * import { getSandbox } from '@cloudflare/sandbox'
- * import { createOpencodeServer, proxyToOpencode } from '@cloudflare/sandbox/opencode'
- *
- * export default {
- *   async fetch(request: Request, env: Env) {
- *     const sandbox = getSandbox(env.Sandbox, 'opencode')
- *     const server = await createOpencodeServer(sandbox, {
- *       directory: '/home/user/project',
- *       config: {
- *         provider: {
- *           anthropic: {
- *             options: { apiKey: env.ANTHROPIC_KEY }
- *           },
- *           // Optional: Route all providers through Cloudflare AI Gateway
- *           'cloudflare-ai-gateway': {
- *             options: {
- *               accountId: env.CF_ACCOUNT_ID,
- *               gatewayId: env.CF_GATEWAY_ID,
- *               apiToken: env.CF_API_TOKEN
- *             }
- *           }
- *         }
- *       }
- *     })
- *     return proxyToOpencode(request, sandbox, server)
- *   }
- * }
- * ```
  */
 export function proxyToOpencode(
   request: Request,

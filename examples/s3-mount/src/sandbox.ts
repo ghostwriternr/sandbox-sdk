@@ -43,7 +43,9 @@ export async function mountBucket(
   const mountCheck = await sandbox.exec(
     '(mountpoint -q /mnt/s3 && echo mounted || echo not-mounted)'
   );
-  if (mountCheck.stdout.trim() === 'mounted') {
+  const mountCheckOut = await mountCheck.output();
+  const mountCheckStdout = new TextDecoder().decode(mountCheckOut.stdout);
+  if (mountCheckStdout.trim() === 'mounted') {
     return { ok: true, status: 'already-mounted' };
   }
 
@@ -51,7 +53,9 @@ export async function mountBucket(
   const fuseCheck = await sandbox.exec(
     '(test -c /dev/fuse && echo ok || echo missing)'
   );
-  if (fuseCheck.stdout.trim() !== 'ok') {
+  const fuseCheckOut = await fuseCheck.output();
+  const fuseCheckStdout = new TextDecoder().decode(fuseCheckOut.stdout);
+  if (fuseCheckStdout.trim() !== 'ok') {
     return { ok: false, error: '/dev/fuse is not available in this container' };
   }
 
@@ -59,7 +63,7 @@ export async function mountBucket(
   // time it needs to refresh credentials. See CREDENTIALS_URI above for why a
   // bare HTTP URL is safe here.
 
-  // mount-s3 --foreground runs indefinitely. startProcess() launches it as a
+  // mount-s3 --foreground runs indefinitely. exec() launches it as a
   // managed background process and returns immediately.
   const mountCmd = [
     'mount-s3',
@@ -72,13 +76,11 @@ export async function mountBucket(
     '--foreground'
   ].join(' ');
 
-  await sandbox.startProcess(mountCmd, {
+  await sandbox.exec(mountCmd, {
     env: {
       AWS_CONTAINER_CREDENTIALS_FULL_URI: CREDENTIALS_URI,
       AWS_REGION: env.AWS_REGION
-    },
-    processId: 'mount-s3',
-    autoCleanup: false
+    }
   });
 
   // Poll until the mount is live (up to 10 seconds)
@@ -87,7 +89,9 @@ export async function mountBucket(
     const poll = await sandbox.exec(
       '(mountpoint -q /mnt/s3 && echo mounted || echo not-mounted)'
     );
-    if (poll.stdout.trim() === 'mounted') {
+    const pollOut = await poll.output();
+    const pollStdout = new TextDecoder().decode(pollOut.stdout);
+    if (pollStdout.trim() === 'mounted') {
       await installShellAutoCd(sandbox);
       return { ok: true, status: 'mounted' };
     }
@@ -97,7 +101,9 @@ export async function mountBucket(
   const diag = await sandbox.exec(
     '(ls -la /dev/fuse; dmesg 2>/dev/null | tail -5 || true)'
   );
-  return { ok: false, error: 'mount timed out', diagnostics: diag.stdout };
+  const diagOut = await diag.output();
+  const diagStdout = new TextDecoder().decode(diagOut.stdout);
+  return { ok: false, error: 'mount timed out', diagnostics: diagStdout };
 }
 
 /**
@@ -116,9 +122,10 @@ async function installShellAutoCd(
     BASHRC_MARKER,
     'if [ -d /mnt/s3 ] && [ "$PWD" = "$HOME" ]; then cd /mnt/s3 2>/dev/null; fi'
   ].join('\n');
-  await sandbox.exec(
+  const proc = await sandbox.exec(
     `grep -qF ${shellQuote(BASHRC_MARKER)} ~/.bashrc 2>/dev/null || printf '%s\n' ${shellQuote(snippet)} >> ~/.bashrc`
   );
+  await proc.exitCode;
 }
 
 function shellQuote(s: string): string {
@@ -134,5 +141,6 @@ function shellQuote(s: string): string {
 export async function unmountBucket(
   sandbox: ReturnType<typeof getSandbox>
 ): Promise<void> {
-  await sandbox.exec('(fusermount -u /mnt/s3 2>&1 || true)');
+  const proc = await sandbox.exec('(fusermount -u /mnt/s3 2>&1 || true)');
+  await proc.exitCode;
 }

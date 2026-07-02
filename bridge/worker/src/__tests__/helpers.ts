@@ -4,36 +4,32 @@ import { vi } from 'vitest';
  * Creates a mock session object matching the shape returned by sandbox.getSession().
  * Each method is a vi.fn() so tests can inspect calls and configure returns.
  *
- * The `exec` mock supports streaming: when called with `stream: true`, it
- * invokes `onOutput` / `onComplete` / `onError` callbacks.
+ * The `exec` mock supports streaming: it returns standard streams and a promise
+ * for exitCode.
  */
 export function createMockSession(id = 'mock-session') {
   const session = {
     id,
     exec: vi.fn(async (_cmd: string, opts?: Record<string, unknown>) => {
-      const result = { stdout: '', stderr: '', exitCode: 0 };
-      if (opts?.stream) {
-        if (opts.onOutput && typeof opts.onOutput === 'function') {
-          if (result.stdout) (opts.onOutput as (s: string, d: string) => void)('stdout', result.stdout);
-          if (result.stderr) (opts.onOutput as (s: string, d: string) => void)('stderr', result.stderr);
-        }
-        if (opts.onComplete && typeof opts.onComplete === 'function') {
-          (opts.onComplete as (r: { exitCode: number }) => void)(result);
-        }
-      }
-      return result;
-    }),
-    startProcess: vi.fn(async (cmd: string, opts?: Record<string, unknown>) => {
-      await session.exec(cmd, {
-        ...opts,
-        stream: true,
-        onComplete(result: { exitCode: number }) {
-          if (typeof opts?.onExit === 'function') {
-            (opts.onExit as (code: number | null) => void)(result.exitCode);
+      const result = {
+        stdout: new ReadableStream({
+          start(c) {
+            c.close();
           }
-        }
-      });
-      return { id: 'mock-process' };
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close();
+          }
+        }),
+        exitCode: Promise.resolve(0),
+        output: async () => ({
+          stdout: new Uint8Array(),
+          stderr: new Uint8Array(),
+          exitCode: 0
+        })
+      };
+      return result;
     }),
     readFileStream: vi.fn(async () => new ReadableStream()),
     writeFile: vi.fn(async () => {})
@@ -45,37 +41,31 @@ export function createMockSession(id = 'mock-session') {
  * Creates a mock sandbox object matching the shape returned by getSandbox().
  * Each method is a vi.fn() so tests can inspect calls and configure returns.
  *
- * The `exec` mock supports streaming: when called with `stream: true`, it
- * invokes `onOutput` / `onComplete` / `onError` callbacks and returns the
- * final result.
+ * The `exec` mock supports streaming: it returns standard streams and a promise
+ * for exitCode.
  */
 export function createMockSandbox() {
   const sandbox = {
     exec: vi.fn(async (_cmd: string, opts?: Record<string, unknown>) => {
-      const result = { stdout: '', stderr: '', exitCode: 0 };
-      if (opts?.stream) {
-        // Streaming mode — fire callbacks if provided
-        if (opts.onOutput && typeof opts.onOutput === 'function') {
-          if (result.stdout) (opts.onOutput as (s: string, d: string) => void)('stdout', result.stdout);
-          if (result.stderr) (opts.onOutput as (s: string, d: string) => void)('stderr', result.stderr);
-        }
-        if (opts.onComplete && typeof opts.onComplete === 'function') {
-          (opts.onComplete as (r: { exitCode: number }) => void)(result);
-        }
-      }
-      return result;
-    }),
-    startProcess: vi.fn(async (cmd: string, opts?: Record<string, unknown>) => {
-      await sandbox.exec(cmd, {
-        ...opts,
-        stream: true,
-        onComplete(result: { exitCode: number }) {
-          if (typeof opts?.onExit === 'function') {
-            (opts.onExit as (code: number | null) => void)(result.exitCode);
+      const result = {
+        stdout: new ReadableStream({
+          start(c) {
+            c.close();
           }
-        }
-      });
-      return { id: 'mock-process' };
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close();
+          }
+        }),
+        exitCode: Promise.resolve(0),
+        output: async () => ({
+          stdout: new Uint8Array(),
+          stderr: new Uint8Array(),
+          exitCode: 0
+        })
+      };
+      return result;
     }),
     readFile: vi.fn(async () => ({ content: 'file content' })),
     readFileStream: vi.fn(async () => new ReadableStream()),

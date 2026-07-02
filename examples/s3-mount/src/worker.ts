@@ -43,10 +43,11 @@ app.post('/api/session/:sandboxId/exec', async (c) => {
   const sandbox = getSandbox(c.env.Sandbox, c.req.param('sandboxId'));
   const { cmd } = await c.req.json<{ cmd: string }>();
   // Keep debug commands self-contained; top-level exec does not preserve shell state.
-  const result = await sandbox.exec(`(${cmd})`);
+  const resultProc = await sandbox.exec(`(${cmd})`);
+  const result = await resultProc.output();
   return c.json({
-    stdout: result.stdout,
-    stderr: result.stderr,
+    stdout: new TextDecoder().decode(result.stdout),
+    stderr: new TextDecoder().decode(result.stderr),
     exitCode: result.exitCode
   });
 });

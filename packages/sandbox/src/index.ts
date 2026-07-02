@@ -27,6 +27,7 @@ export type {
   RemoteMountBucketOptions,
   RestoreBackupResult,
   SandboxOptions,
+  SandboxProcess,
   SessionOptions,
   TerminalOptions,
   TunnelInfo,

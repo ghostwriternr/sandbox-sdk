@@ -510,20 +510,76 @@ export function createBridgeApp(
     }
 
     executor
-      .startProcess(command, {
-        ...opts,
-        onOutput(stream: 'stdout' | 'stderr', data: string) {
-          writeSSE(stream, toBase64(data));
-        },
-        onExit(code: number | null) {
+      .exec(command, opts)
+      .then(async (proc) => {
+        const stdoutStream = proc.stdout;
+        const stderrStream = proc.stderr;
+
+        const streamPromises: Promise<void>[] = [];
+
+        if (stdoutStream) {
+          streamPromises.push(
+            (async () => {
+              const reader = stdoutStream.getReader();
+              const decoder = new TextDecoder();
+              try {
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  const text = decoder.decode(value, { stream: true });
+                  if (text) {
+                    writeSSE('stdout', toBase64(text));
+                  }
+                }
+                const remaining = decoder.decode();
+                if (remaining) {
+                  writeSSE('stdout', toBase64(remaining));
+                }
+              } finally {
+                reader.releaseLock();
+              }
+            })()
+          );
+        }
+
+        if (stderrStream) {
+          streamPromises.push(
+            (async () => {
+              const reader = stderrStream.getReader();
+              const decoder = new TextDecoder();
+              try {
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  const text = decoder.decode(value, { stream: true });
+                  if (text) {
+                    writeSSE('stderr', toBase64(text));
+                  }
+                }
+                const remaining = decoder.decode();
+                if (remaining) {
+                  writeSSE('stderr', toBase64(remaining));
+                }
+              } finally {
+                reader.releaseLock();
+              }
+            })()
+          );
+        }
+
+        try {
+          await Promise.all(streamPromises);
+          const code = await proc.exitCode;
           writeSSE('exit', JSON.stringify({ exit_code: code ?? -1 }));
-          closeStream();
-        },
-        onError(err: Error) {
+        } catch (err: unknown) {
           writeSSE(
             'error',
-            JSON.stringify({ error: err.message, code: 'exec_error' })
+            JSON.stringify({
+              error: err instanceof Error ? err.message : String(err),
+              code: 'exec_error'
+            })
           );
+        } finally {
           closeStream();
         }
       })
@@ -833,11 +889,12 @@ export function createBridgeApp(
       : `tar cf ${shellQuote(tmpPath)} -C ${shellQuote(root)} .`;
 
     try {
-      const result = await sandbox.exec(tarCmd);
+      const proc = await sandbox.exec(tarCmd);
+      const result = await proc.output();
 
       if (result.exitCode !== 0) {
         return errorJson(
-          `tar failed (exit ${result.exitCode}): ${result.stderr}`,
+          `tar failed (exit ${result.exitCode}): ${new TextDecoder().decode(result.stderr)}`,
           'workspace_archive_read_error',
           502
         );
@@ -894,7 +951,8 @@ export function createBridgeApp(
     }
 
     try {
-      await sandbox.exec(`mkdir -p ${shellQuote(root)}`);
+      const mkdirProc = await sandbox.exec(`mkdir -p ${shellQuote(root)}`);
+      await mkdirProc.exitCode;
 
       const tmpPath = `/tmp/sandbox-hydrate-${Date.now()}.tar`;
 
@@ -905,12 +963,13 @@ export function createBridgeApp(
       }
       await sandbox.writeFile(tmpPath, b64, { encoding: 'base64' });
 
-      const extractResult = await sandbox.exec(
+      const extractProc = await sandbox.exec(
         `tar xf ${shellQuote(tmpPath)} -C ${shellQuote(root)} && rm -f ${shellQuote(tmpPath)}`
       );
+      const extractResult = await extractProc.output();
       if (extractResult.exitCode !== 0) {
         return errorJson(
-          `tar extract failed (exit ${extractResult.exitCode}): ${extractResult.stderr}`,
+          `tar extract failed (exit ${extractResult.exitCode}): ${new TextDecoder().decode(extractResult.stderr)}`,
           'workspace_archive_write_error',
           502
         );

@@ -50,11 +50,12 @@ async function handleExec(request: Request, env: Env): Promise<Response> {
 
   try {
     const sandbox = getSandbox(env.Sandbox, 'time-machine');
-    const result = await sandbox.exec(command);
+    const proc = await sandbox.exec(command);
+    const result = await proc.output();
 
     return Response.json({
-      stdout: result.stdout,
-      stderr: result.stderr,
+      stdout: new TextDecoder().decode(result.stdout),
+      stderr: new TextDecoder().decode(result.stderr),
       exitCode: result.exitCode
     });
   } catch (error) {

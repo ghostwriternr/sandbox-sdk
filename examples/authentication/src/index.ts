@@ -25,7 +25,7 @@ export default {
     if (url.pathname === '/test/anthropic') {
       const sandbox = getSandbox(env.Sandbox, 'test-sandbox');
 
-      const result = await sandbox.exec(`
+      const proc = await sandbox.exec(`
         curl -s "https://api.anthropic.com/v1/messages" \
           -H "Content-Type: application/json" \
           -H "x-api-key: placeholder" \
@@ -33,25 +33,31 @@ export default {
           -H "Accept-Encoding: identity" \
           -d '{"model":"claude-haiku-4-5-20251001","max_tokens":20,"messages":[{"role":"user","content":"Say hi"}]}'
       `);
+      const result = await proc.output();
+      const stdout = new TextDecoder().decode(result.stdout);
+      const stderr = new TextDecoder().decode(result.stderr);
 
       return Response.json({
         success: result.exitCode === 0,
-        output: result.stdout || result.stderr
+        output: stdout || stderr
       });
     }
 
     if (url.pathname === '/test/github') {
       const sandbox = getSandbox(env.Sandbox, 'test-sandbox');
 
-      const result = await sandbox.exec(`
+      const proc = await sandbox.exec(`
         cd /tmp && rm -rf sandbox-scm-test
         git clone https://github.com/ghostwriternr/sandbox-scm-test 2>&1
         ls sandbox-scm-test
       `);
+      const result = await proc.output();
+      const stdout = new TextDecoder().decode(result.stdout);
+      const stderr = new TextDecoder().decode(result.stderr);
 
       return Response.json({
         success: result.exitCode === 0,
-        output: result.stdout || result.stderr
+        output: stdout || stderr
       });
     }
 
@@ -60,21 +66,25 @@ export default {
       const testContent = `Hello from sandbox at ${new Date().toISOString()}`;
       const bucket = 'sandbox-auth-test';
 
-      await sandbox.exec(`
+      const writeProc = await sandbox.exec(`
         curl -s -X PUT "http://r2.worker/${bucket}/test-file.txt" \
           -H "Content-Type: text/plain" \
           -d '${testContent}'
       `);
+      await writeProc.exitCode;
 
-      const readResult = await sandbox.exec(`
+      const readProc = await sandbox.exec(`
         curl -s "http://r2.worker/${bucket}/test-file.txt" \
           -H "Accept-Encoding: identity"
       `);
+      const readResult = await readProc.output();
+      const readStdout = new TextDecoder().decode(readResult.stdout);
+      const readStderr = new TextDecoder().decode(readResult.stderr);
 
       return Response.json({
-        success: readResult.exitCode === 0 && readResult.stdout === testContent,
+        success: readResult.exitCode === 0 && readStdout === testContent,
         written: testContent,
-        read: readResult.stdout || readResult.stderr
+        read: readStdout || readStderr
       });
     }
 
