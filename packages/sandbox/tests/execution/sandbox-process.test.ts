@@ -42,6 +42,23 @@ describe('createSandboxProcess', () => {
     expect(output.exitCode).toBe(0);
   });
 
+  it('rejects repeated output reads', async () => {
+    const process = createSandboxProcess({
+      pid: 789,
+      stdin: null,
+      stdout: streamFromText('out'),
+      stderr: streamFromText(''),
+      exitCode: Promise.resolve(0),
+      kill: vi.fn(),
+      waitForPort: vi.fn()
+    });
+
+    await process.output();
+    await expect(process.output()).rejects.toThrow(
+      'output() can only be called once.'
+    );
+  });
+
   it('delegates waitForPort with the process exitCode promise', async () => {
     const waitForPort = vi.fn<
       (

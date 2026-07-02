@@ -200,8 +200,8 @@ describe('POST /sandbox/:id/exec — SSE streaming', () => {
     const events = parseSSE(text);
 
     expect(events).toHaveLength(4);
-    // Note: because stdout and stderr stream reading are concurrent, the exact interleaved order can be:
-    // e.g. line1, warn1, line2, exit (or similar). Let's verify events contain the expected items.
+    // stdout and stderr stream reading are concurrent, so only the exit event
+    // has a stable position.
     const eventNames = events.map((e) => e.event);
     expect(eventNames).toContain('stdout');
     expect(eventNames).toContain('stderr');
@@ -241,6 +241,13 @@ describe('POST /sandbox/:id/exec — pre-validation errors (JSON)', () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string; code: string };
     expect(body.error).toContain('argv must be a non-empty array');
+  });
+
+  it('returns 400 for non-string argv items', async () => {
+    const res = await execRequest({ argv: ['echo', 123] });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; code: string };
+    expect(body.error).toContain('argv items must be strings');
   });
 
   it('returns 403 for cwd outside /workspace', async () => {

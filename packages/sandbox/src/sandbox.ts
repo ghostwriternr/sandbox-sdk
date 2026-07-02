@@ -347,7 +347,10 @@ type SandboxProxyStub = ConfigurableSandboxStub & {
   ) => Promise<unknown>;
   createTerminal: (options: TerminalCreateOptions) => Promise<void>;
   destroyTerminal: (id: string) => Promise<void>;
-  exec: (command: string, options?: ExecOptions) => Promise<ExecResult>;
+  exec: (
+    command: SandboxCommand,
+    options?: ExecOptions
+  ) => Promise<SandboxProcess>;
 };
 
 const sandboxConfigurationCache = new WeakMap<
@@ -2903,7 +2906,6 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     }
   }
 
-  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Implemented verbatim as requested by Task 3 brief
   private async ensureControlPlaneReady(signal?: AbortSignal): Promise<void> {
     await this.startAndWaitForPorts({
       ports: this.defaultPort,
@@ -4500,7 +4502,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
           ? `Failed to ${actionContext.action} environment variable "${actionContext.key}"`
           : `Command "${command}" failed`;
         throw new Error(
-          `${actionMsg}: ${stderrStr || 'Unknown error (exit code ' + output.exitCode + ')'}`
+          `${actionMsg}: ${stderrStr || `Unknown error (exit code ${output.exitCode})`}`
         );
       }
     };

@@ -451,6 +451,9 @@ export function createBridgeApp(
         400
       );
     }
+    if (body.argv.some((item) => typeof item !== 'string')) {
+      return errorJson('argv items must be strings', 'invalid_request', 400);
+    }
 
     const sandbox = getSandbox(getSandboxNs(c.env), c.get('containerUUID'));
     const rawSessionId = c.req.header('Session-Id');
