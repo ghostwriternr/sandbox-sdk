@@ -103,7 +103,6 @@ export class Shell implements OpenAIShell {
         stdout = new TextDecoder().decode(out.stdout);
         stderr = new TextDecoder().decode(out.stderr);
         exitCode = out.exitCode;
-        // exec returns a result even for failed commands, so check success field
         // Timeout would be indicated by a specific error or exit code
         outcome = { type: 'exit', exitCode };
 

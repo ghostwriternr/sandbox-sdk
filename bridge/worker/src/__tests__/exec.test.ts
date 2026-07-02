@@ -125,6 +125,10 @@ describe('POST /sandbox/:id/exec — SSE streaming', () => {
   });
 
   it('sends error event when exitCode rejects', async () => {
+    const exitCodePromise = Promise.reject(new Error('command not found'));
+    // Attach a no-op handler to prevent unhandled promise rejection warnings in the test environment, as the promise is expected to reject and will be observed directly by the exec route handler.
+    exitCodePromise.catch(() => {});
+
     mockSandbox.exec.mockResolvedValue({
       stdout: new ReadableStream({
         start(c) {
@@ -136,7 +140,7 @@ describe('POST /sandbox/:id/exec — SSE streaming', () => {
           c.close();
         }
       }),
-      exitCode: Promise.reject(new Error('command not found')),
+      exitCode: exitCodePromise,
       output: async () => {
         throw new Error('command not found');
       }
