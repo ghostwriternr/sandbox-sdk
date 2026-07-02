@@ -3403,8 +3403,6 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
   ): Promise<SandboxProcess> {
     const startTime = Date.now();
     const commandText = commandToLogString(command);
-    let exitCode: number | undefined;
-    let execError: Error | undefined;
 
     try {
       await this.ensureContainerRunning();
@@ -3416,38 +3414,65 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
         nativeOptions
       );
 
-      nativeProcess.exitCode
+      const exitCodePromise = this.withExecTimeout(
+        nativeProcess,
+        options.timeout
+      );
+
+      // Successfully spawned - register completion logging in background without blocking
+      exitCodePromise
         .then((code) => {
-          exitCode = code;
+          logCanonicalEvent(this.logger, {
+            event: 'sandbox.exec',
+            outcome: 'success',
+            command: commandText,
+            exitCode: code,
+            durationMs: Date.now() - startTime,
+            sessionId: undefined,
+            origin: options.origin ?? 'user'
+          });
         })
-        .catch(() => {});
+        .catch((err) => {
+          const errorObj = err instanceof Error ? err : new Error(String(err));
+          logCanonicalEvent(this.logger, {
+            event: 'sandbox.exec',
+            outcome: 'error',
+            command: commandText,
+            exitCode: undefined,
+            durationMs: Date.now() - startTime,
+            sessionId: undefined,
+            origin: options.origin ?? 'user',
+            error: errorObj,
+            errorMessage: errorObj.message
+          });
+        });
 
       return createSandboxProcess({
         pid: nativeProcess.pid,
         stdin: nativeProcess.stdin,
         stdout: nativeProcess.stdout,
         stderr: nativeProcess.stderr,
-        exitCode: this.withExecTimeout(nativeProcess, options.timeout),
+        exitCode: exitCodePromise,
         output: () => nativeProcess.output(),
         kill: (signal) => nativeProcess.kill(signal),
         waitForPort: (port, waitOptions, processExitCode) =>
           this.waitForPortForProcess(port, waitOptions, processExitCode)
       });
     } catch (error) {
-      execError = error instanceof Error ? error : new Error(String(error));
-      throw error;
-    } finally {
+      const execError =
+        error instanceof Error ? error : new Error(String(error));
       logCanonicalEvent(this.logger, {
         event: 'sandbox.exec',
-        outcome: execError ? 'error' : 'success',
+        outcome: 'error',
         command: commandText,
-        exitCode,
+        exitCode: undefined,
         durationMs: Date.now() - startTime,
         sessionId: undefined,
         origin: options.origin ?? 'user',
         error: execError,
-        errorMessage: execError?.message
+        errorMessage: execError.message
       });
+      throw error;
     }
   }
 
@@ -3692,12 +3717,6 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       sessionId
     };
   }
-
-  /**
-   * Create a Process domain object from HTTP client DTO
-   * Centralizes process object creation with bound methods
-   * This eliminates duplication across startProcess, listProcesses, getProcess, and session wrappers
-   */
 
   async gitCheckout(
     repoUrl: string,

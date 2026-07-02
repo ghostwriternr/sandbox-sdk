@@ -457,6 +457,59 @@ describe('Sandbox - Automatic Session Management', () => {
       expect(killMock).not.toHaveBeenCalled();
     });
 
+    it('logs sandbox.exec canonical event with correct exitCode after process exits', async () => {
+      const infoSpy = vi.spyOn((sandbox as any).logger, 'info');
+
+      let resolveProcessExit: (code: number) => void = () => {};
+      const processExitCodePromise = new Promise<number>((resolve) => {
+        resolveProcessExit = resolve;
+      });
+
+      const nativeProcessMock = {
+        stdin: null,
+        stdout: textStream(''),
+        stderr: textStream(''),
+        pid: 123,
+        exitCode: processExitCodePromise,
+        output: async () => ({
+          stdout: new ArrayBuffer(0),
+          stderr: new ArrayBuffer(0),
+          exitCode: 42
+        }),
+        kill: vi.fn()
+      };
+
+      const nativeExec = vi.fn(async () => nativeProcessMock);
+      Object.assign((sandbox as any).ctx, {
+        container: { running: true, exec: nativeExec }
+      });
+
+      const process = await sandbox.exec('echo test_logging');
+
+      // Process handle returned immediately
+      expect(process).toBeDefined();
+      // Should not have logged 'success' yet
+      expect(infoSpy).not.toHaveBeenCalled();
+
+      // Resolve the exit code
+      resolveProcessExit(42);
+
+      // Wait for background promise to settle
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringContaining('sandbox.exec'),
+        expect.objectContaining({
+          event: 'sandbox.exec',
+          outcome: 'success',
+          command: 'echo test_logging',
+          exitCode: 42
+        })
+      );
+
+      infoSpy.mockRestore();
+    });
+
     it('waitForPort readiness resolves and subsequent process exit or timeout does not fail', async () => {
       // Mock watchPort stream to return 'ready' event
       const readyEvent = new TextEncoder().encode(

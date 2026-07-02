@@ -3,13 +3,11 @@
 // Export core SDK types for consumers
 export type {
   BackupOptions,
-  BaseExecOptions,
   BucketCredentials,
   BucketProvider,
   CheckChangesOptions,
   CheckChangesResult,
   DirectoryBackup,
-  ExecEvent,
   ExecOptions,
   ExecResult,
   ExecutionSession,
@@ -22,12 +20,8 @@ export type {
   ISandbox,
   ListFilesOptions,
   LocalMountBucketOptions,
-  LogEvent,
   MountBucketOptions,
   NamedTunnelInfo,
-  Process,
-  ProcessOptions,
-  ProcessStatus,
   PtyOptions,
   QuickTunnelInfo,
   RemoteMountBucketOptions,
@@ -37,12 +31,11 @@ export type {
   TerminalOptions,
   TunnelInfo,
   TunnelOptions,
-  WaitForLogResult,
   WaitForPortOptions,
   WatchOptions
 } from '@repo/shared';
 // Export type guards for runtime validation
-export { isExecResult, isProcess, isProcessStatus } from '@repo/shared';
+export { isExecResult } from '@repo/shared';
 export type { RPCTransportContext, RPCTransportErrorKind } from './errors';
 // Export backup and process readiness errors
 export {
