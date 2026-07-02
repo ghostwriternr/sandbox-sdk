@@ -1,3 +1,13 @@
+import type {
+  ExecOptions,
+  ExecOutput,
+  SandboxCommand,
+  SessionCreateOptions,
+  SessionCreateResult,
+  SessionDeleteResult,
+  SessionExecStartResult,
+  SessionListResult
+} from '@repo/shared';
 import { vi } from 'vitest';
 import type { Sandbox } from '../../src/sandbox';
 
@@ -9,9 +19,6 @@ import type { Sandbox } from '../../src/sandbox';
  */
 export function createMockControlClient(): Sandbox['client'] {
   return {
-    commands: {
-      execute: vi.fn()
-    },
     files: {
       readFile: vi.fn(),
       readFileStream: vi.fn(),
@@ -25,19 +32,53 @@ export function createMockControlClient(): Sandbox['client'] {
       exists: vi.fn()
     },
     sessions: {
-      create: vi.fn(),
-      delete: vi.fn(),
-      list: vi.fn(),
-      exec: vi.fn()
-    },
-    processes: {
-      startProcess: vi.fn(),
-      listProcesses: vi.fn(),
-      getProcess: vi.fn(),
-      killProcess: vi.fn(),
-      killAllProcesses: vi.fn(),
-      getProcessLogs: vi.fn(),
-      streamProcessLogs: vi.fn()
+      create: vi.fn(
+        async (
+          options?: SessionCreateOptions
+        ): Promise<SessionCreateResult> => {
+          return {
+            success: true,
+            sessionId: options?.id ?? 'mock-session-id',
+            timestamp: new Date().toISOString()
+          };
+        }
+      ),
+      delete: vi.fn(async (sessionId: string): Promise<SessionDeleteResult> => {
+        return {
+          success: true,
+          sessionId,
+          timestamp: new Date().toISOString()
+        };
+      }),
+      list: vi.fn(async (): Promise<SessionListResult> => {
+        return {
+          success: true,
+          sessions: [],
+          timestamp: new Date().toISOString()
+        };
+      }),
+      exec: vi.fn(
+        async (
+          _sessionId: string,
+          _command: SandboxCommand,
+          _options?: ExecOptions
+        ): Promise<SessionExecStartResult> => {
+          return {
+            processId: 'mock-proc-id',
+            pid: 123,
+            stdin: null,
+            stdout: null,
+            stderr: null,
+            exitCode: Promise.resolve(0),
+            output: async (): Promise<ExecOutput> => ({
+              exitCode: 0,
+              stdout: new ArrayBuffer(0),
+              stderr: new ArrayBuffer(0)
+            }),
+            kill: (_signal?: number): void => {}
+          };
+        }
+      )
     },
     ports: {
       watchPort: vi.fn()
@@ -48,10 +89,7 @@ export function createMockControlClient(): Sandbox['client'] {
     utils: {
       ping: vi.fn(),
       getVersion: vi.fn(),
-      getCommands: vi.fn(),
-      createSession: vi.fn(),
-      deleteSession: vi.fn(),
-      listSessions: vi.fn()
+      getCommands: vi.fn()
     },
     backup: {
       createArchive: vi.fn(),

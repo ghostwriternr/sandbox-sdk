@@ -74,6 +74,8 @@ vi.mock('@cloudflare/containers', () => {
       return { status: 'healthy' };
     }
 
+    async startAndWaitForPorts(): Promise<void> {}
+
     renewActivityTimeout() {}
 
     async setOutboundByHost(_hostname: string, _method: string): Promise<void> {
@@ -895,8 +897,7 @@ describe('Sandbox R2 egress mounts', () => {
 
     vi.mocked(client.sessions.create).mockResolvedValue({
       success: true,
-      id: 'sandbox-default',
-      message: 'Created',
+      sessionId: 'sandbox-default',
       timestamp: new Date().toISOString()
     });
     vi.mocked(client.files.mkdir).mockResolvedValue({

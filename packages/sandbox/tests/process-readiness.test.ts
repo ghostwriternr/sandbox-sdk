@@ -29,6 +29,7 @@ vi.mock('@cloudflare/containers', () => {
     async getState() {
       return { status: 'healthy' };
     }
+    async startAndWaitForPorts(): Promise<void> {}
   };
 
   return {

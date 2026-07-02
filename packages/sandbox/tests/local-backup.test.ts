@@ -1,3 +1,4 @@
+import type { SandboxCommand } from '@repo/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { connect, Sandbox } from '../src/sandbox';
 import { createMockControlClient } from './helpers/mock-control-client';
@@ -26,6 +27,7 @@ vi.mock('@cloudflare/containers', () => {
     async getState() {
       return { status: 'healthy' };
     }
+    async startAndWaitForPorts(): Promise<void> {}
     renewActivityTimeout() {}
   };
 
@@ -198,13 +200,19 @@ describe('Local Backup & Restore', () => {
     } as any);
 
     // Mock command execution (for exec, rm, mkdir, unsquashfs)
-    vi.spyOn(sandbox.client.commands, 'execute').mockResolvedValue({
-      success: true,
-      stdout: '',
-      stderr: '',
-      exitCode: 0,
-      command: '',
-      timestamp: new Date().toISOString()
+    vi.spyOn(sandbox.client.sessions, 'exec').mockResolvedValue({
+      pid: 123,
+      stdin: null,
+      stdout: null,
+      stderr: null,
+      exitCode: Promise.resolve(0),
+      output: () =>
+        Promise.resolve({
+          exitCode: 0,
+          stdout: new Uint8Array(),
+          stderr: new Uint8Array()
+        }),
+      kill: () => {}
     } as any);
   });
 
@@ -471,13 +479,13 @@ describe('Local Backup & Restore', () => {
       );
 
       // Verify unsquashfs was called
-      const execCalls = vi.mocked(sandbox.client.commands.execute).mock.calls;
+      const execCalls = vi.mocked(sandbox.client.sessions.exec).mock.calls;
       const unsquashfsCall = execCalls.find(
-        (call) => typeof call[0] === 'string' && call[0].includes('unsquashfs')
+        (call) => typeof call[1] === 'string' && call[1].includes('unsquashfs')
       );
       expect(unsquashfsCall).toBeDefined();
-      expect(unsquashfsCall![0]).toContain('/usr/bin/unsquashfs');
-      expect(unsquashfsCall![0]).toContain('/workspace/myapp');
+      expect(unsquashfsCall![1]).toContain('/usr/bin/unsquashfs');
+      expect(unsquashfsCall![1]).toContain('/workspace/myapp');
     });
 
     it('should throw if BACKUP_BUCKET binding is missing for restore', async () => {
@@ -569,12 +577,12 @@ describe('Local Backup & Restore', () => {
       });
 
       // Verify cleanup rm -f was called for the archive
-      const execCalls = vi.mocked(sandbox.client.commands.execute).mock.calls;
+      const execCalls = vi.mocked(sandbox.client.sessions.exec).mock.calls;
       const rmCall = execCalls.find(
         (call) =>
-          typeof call[0] === 'string' &&
-          call[0].includes('rm -f') &&
-          call[0].includes('.sqsh')
+          typeof call[1] === 'string' &&
+          call[1].includes('rm -f') &&
+          call[1].includes('.sqsh')
       );
       expect(rmCall).toBeDefined();
     });
@@ -606,25 +614,39 @@ describe('Local Backup & Restore', () => {
       } as any);
 
       // Make unsquashfs fail
-      vi.mocked(sandbox.client.commands.execute).mockImplementation(
-        async (command: string) => {
-          if (command.includes('unsquashfs')) {
+      vi.mocked(sandbox.client.sessions.exec).mockImplementation(
+        async (_sessionId: string, command: SandboxCommand) => {
+          const cmdStr =
+            typeof command === 'string' ? command : command.join(' ');
+          if (cmdStr.includes('unsquashfs')) {
             return {
-              success: false,
-              stdout: '',
-              stderr: 'unsquashfs: bad archive',
-              exitCode: 1,
-              command,
-              timestamp: new Date().toISOString()
+              pid: 123,
+              stdin: null,
+              stdout: null,
+              stderr: null,
+              exitCode: Promise.resolve(1),
+              output: () =>
+                Promise.resolve({
+                  exitCode: 1,
+                  stdout: new Uint8Array(),
+                  stderr: new TextEncoder().encode('unsquashfs: bad archive')
+                }),
+              kill: () => {}
             } as any;
           }
           return {
-            success: true,
-            stdout: '',
-            stderr: '',
-            exitCode: 0,
-            command,
-            timestamp: new Date().toISOString()
+            pid: 123,
+            stdin: null,
+            stdout: null,
+            stderr: null,
+            exitCode: Promise.resolve(0),
+            output: () =>
+              Promise.resolve({
+                exitCode: 0,
+                stdout: new Uint8Array(),
+                stderr: new Uint8Array()
+              }),
+            kill: () => {}
           } as any;
         }
       );
@@ -670,9 +692,9 @@ describe('Local Backup & Restore', () => {
         })
       ).rejects.toThrow('disk full');
 
-      const execCalls = vi.mocked(sandbox.client.commands.execute).mock.calls;
+      const execCalls = vi.mocked(sandbox.client.sessions.exec).mock.calls;
       const unsquashfsCall = execCalls.find(
-        (call) => typeof call[0] === 'string' && call[0].includes('unsquashfs')
+        (call) => typeof call[1] === 'string' && call[1].includes('unsquashfs')
       );
       expect(unsquashfsCall).toBeUndefined();
     });
@@ -722,15 +744,15 @@ describe('Local Backup & Restore', () => {
       expect(result.success).toBe(true);
 
       // Verify unsquashfs was used (local path), not presigned URLs
-      const execCalls = vi.mocked(sandbox.client.commands.execute).mock.calls;
+      const execCalls = vi.mocked(sandbox.client.sessions.exec).mock.calls;
       const unsquashfsCall = execCalls.find(
-        (call) => typeof call[0] === 'string' && call[0].includes('unsquashfs')
+        (call) => typeof call[1] === 'string' && call[1].includes('unsquashfs')
       );
       expect(unsquashfsCall).toBeDefined();
 
       // Verify no curl calls (production uses curl for presigned URLs)
       const curlCall = execCalls.find(
-        (call) => typeof call[0] === 'string' && call[0].includes('curl')
+        (call) => typeof call[1] === 'string' && call[1].includes('curl')
       );
       expect(curlCall).toBeUndefined();
     });

@@ -17,6 +17,8 @@ vi.mock('@cloudflare/containers', () => {
     async getState(): Promise<{ status: string }> {
       return { status: 'healthy' };
     }
+
+    async startAndWaitForPorts(): Promise<void> {}
   }
 
   return {
@@ -164,14 +166,6 @@ async function createLocalRestoreSandbox(params?: {
     success: true,
     path: `/var/backups/${backupId}.sqsh`,
     bytesWritten: 4,
-    timestamp: '2026-06-15T12:00:00.000Z'
-  } as never);
-  vi.spyOn(sandbox.client.commands, 'execute').mockResolvedValue({
-    success: true,
-    stdout: '',
-    stderr: '',
-    exitCode: 0,
-    command: '',
     timestamp: '2026-06-15T12:00:00.000Z'
   } as never);
 

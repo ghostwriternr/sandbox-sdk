@@ -16,6 +16,8 @@ import type {
   ExecResult,
   ExecutionSession,
   FileEncoding,
+  GitCheckoutOptions,
+  GitCheckoutResult,
   ISandbox,
   ListFilesOptions,
   LocalMountBucketOptions,
@@ -2307,7 +2309,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     // of the mount.
     //
     // The whole script runs inside a `( ... )` subshell. When a caller supplies
-    // an explicit sessionId, executeCommand dispatches into that session's
+    // an explicit sessionId, sessions.exec dispatches into that session's
     // long-lived bash shell; a bare top-level `exit N` would terminate the
     // session. The subshell scopes exits so only the subshell exits, and its
     // status becomes the command's exit code as the caller expects.
@@ -4484,13 +4486,22 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
   }
 
   private getSessionWrapper(sessionId: string): ExecutionSession {
-    const runSessionInternal = async (command: string): Promise<void> => {
+    const runSessionInternal = async (
+      command: string,
+      actionContext?: { key: string; action: 'set' | 'unset' }
+    ): Promise<void> => {
       const proc = await this.client.sessions.exec(sessionId, command, {
         origin: 'internal'
       });
       const output = await proc.output();
       if (output.exitCode !== 0) {
-        throw new Error(new TextDecoder().decode(output.stderr));
+        const stderrStr = new TextDecoder().decode(output.stderr).trim();
+        const actionMsg = actionContext
+          ? `Failed to ${actionContext.action} environment variable "${actionContext.key}"`
+          : `Command "${command}" failed`;
+        throw new Error(
+          `${actionMsg}: ${stderrStr || 'Unknown error (exit code ' + output.exitCode + ')'}`
+        );
       }
     };
 
@@ -4552,7 +4563,10 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       exists: (path: string) => this.exists(path, { sessionId }),
 
       // Git operations
-      gitCheckout: (repoUrl: string, options?: any) =>
+      gitCheckout: (
+        repoUrl: string,
+        options?: Omit<GitCheckoutOptions, 'sessionId'>
+      ): Promise<GitCheckoutResult> =>
         this.gitCheckout(repoUrl, { ...options, sessionId }),
 
       setEnvVars: async (envVars: Record<string, string | undefined>) => {
@@ -4561,12 +4575,12 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
         try {
           for (const key of toUnset) {
             const unsetCommand = `unset ${key}`;
-            await runSessionInternal(unsetCommand);
+            await runSessionInternal(unsetCommand, { key, action: 'unset' });
           }
 
           for (const [key, value] of Object.entries(toSet)) {
             const exportCommand = `export ${key}=${shellEscape(value)}`;
-            await runSessionInternal(exportCommand);
+            await runSessionInternal(exportCommand, { key, action: 'set' });
           }
         } catch (error) {
           this.logger.error(
@@ -4578,15 +4592,49 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
         }
       },
 
+      getEnvVars: async (): Promise<Record<string, string>> => {
+        const proc = await this.client.sessions.exec(sessionId, 'env', {
+          origin: 'internal'
+        });
+        const output = await proc.output();
+        if (output.exitCode !== 0) {
+          const stderrStr = new TextDecoder().decode(output.stderr);
+          throw new Error(
+            `Failed to get environment variables: ${stderrStr || 'Unknown error'}`
+          );
+        }
+        const stdoutStr = new TextDecoder().decode(output.stdout);
+        const env: Record<string, string> = {};
+        for (const line of stdoutStr.split('\n')) {
+          const firstEqual = line.indexOf('=');
+          if (firstEqual !== -1) {
+            const key = line.substring(0, firstEqual);
+            const value = line.substring(firstEqual + 1);
+            env[key] = value;
+          }
+        }
+        return env;
+      },
+
+      delete: async (): Promise<SessionDeleteResult> => {
+        return this.deleteSession(sessionId);
+      },
+
       // Bucket mounting - sandbox-level operations
-      mountBucket: (bucket: any, mountPath: string, options?: any) =>
-        this.mountBucket(bucket, mountPath, options),
-      unmountBucket: (mountPath: string) => this.unmountBucket(mountPath),
+      mountBucket: (
+        bucket: string,
+        mountPath: string,
+        options?: MountBucketOptions
+      ): Promise<void> => this.mountBucket(bucket, mountPath, options ?? {}),
+      unmountBucket: (mountPath: string): Promise<void> =>
+        this.unmountBucket(mountPath),
 
       // Backup operations - sandbox-level, uses R2 binding
-      createBackup: (options: BackupOptions) => this.createBackup(options),
-      restoreBackup: (backup: DirectoryBackup) => this.restoreBackup(backup)
-    } as unknown as ExecutionSession;
+      createBackup: (options: BackupOptions): Promise<DirectoryBackup> =>
+        this.createBackup(options),
+      restoreBackup: (backup: DirectoryBackup): Promise<RestoreBackupResult> =>
+        this.restoreBackup(backup)
+    } as ExecutionSession;
   }
 
   // ============================================================================
