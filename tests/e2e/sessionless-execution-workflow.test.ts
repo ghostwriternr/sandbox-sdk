@@ -9,12 +9,6 @@ import {
   createTestSandbox,
   type TestSandbox
 } from './helpers/global-sandbox';
-import {
-  collectProcessStdout,
-  collectProcessStreamEvents,
-  startProcessViaTestWorker,
-  streamProcessViaTestWorker
-} from './helpers/process-stream';
 
 async function executeCommand(
   workerUrl: string,
@@ -70,35 +64,18 @@ describe('Sessionless Execution Workflow', () => {
     expect(cwd).not.toBe(testDir);
   }, 90000);
 
-  test('should stream implicit processes without a persistent shell', async () => {
-    const setup = await executeCommand(
-      workerUrl,
+  test('should execute argv commands directly', async () => {
+    const response = await fetch(`${workerUrl}/api/execute`, {
+      method: 'POST',
       headers,
-      `export SESSIONLESS_STREAM_MARKER=hidden && printf '%s' "$SESSIONLESS_STREAM_MARKER"`
-    );
-    expect(setup.success).toBe(true);
-    expect(setup.stdout).toBe('hidden');
+      body: JSON.stringify({ command: ['printf', 'argv-ok'] })
+    });
 
-    const process = await startProcessViaTestWorker(
-      workerUrl,
-      headers,
-      `printf '%s' "\${SESSIONLESS_STREAM_MARKER:-missing}"`
-    );
-    const streamResponse = await streamProcessViaTestWorker(
-      workerUrl,
-      headers,
-      process.id
-    );
-    expect(streamResponse.status).toBe(200);
-
-    const events = await collectProcessStreamEvents(streamResponse);
-    const exit = events.find((event) => event.type === 'exit');
-    const error = events.find((event) => event.type === 'error');
-
-    expect(collectProcessStdout(events)).toBe('missing');
-    expect(exit).toBeDefined();
-    expect(error).toBeUndefined();
-  }, 90000);
+    expect(response.status).toBe(200);
+    const result = (await response.json()) as ExecResult;
+    expect(result.stdout).toBe('argv-ok');
+    expect(result.exitCode).toBe(0);
+  });
 
   test('should time out implicit commands', async () => {
     const response = await fetch(`${workerUrl}/api/execute`, {

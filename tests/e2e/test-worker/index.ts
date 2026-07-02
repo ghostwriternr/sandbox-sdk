@@ -249,21 +249,7 @@ export default {
     try {
       // WebSocket init endpoint - starts all WebSocket servers
       if (url.pathname === '/api/init' && request.method === 'POST') {
-        const processes = await sandbox.listProcesses();
-        const isServerRunning = (commandFragment: string): boolean =>
-          processes.some(
-            (p) => p.status === 'running' && p.command.includes(commandFragment)
-          );
-
-        const serversToStart: Array<{
-          name: string;
-          port: number;
-          start: Promise<Process>;
-        }> = [];
-
-        // Echo server
-        if (!isServerRunning('/tmp/ws-echo.ts')) {
-          const echoScript = `
+        const echoScript = `
 const port = 8080;
 Bun.serve({
   port,
@@ -279,52 +265,28 @@ Bun.serve({
 });
 console.log('Echo server on port ' + port);
 `;
-          await sandbox.writeFile('/tmp/ws-echo.ts', echoScript);
-          serversToStart.push({
-            name: 'echo',
-            port: 8080,
-            start: sandbox.startProcess('bun run /tmp/ws-echo.ts')
+        await sandbox.writeFile('/tmp/ws-echo.ts', echoScript);
+        const proc = await sandbox.exec('bun run /tmp/ws-echo.ts');
+        let error: string | undefined;
+        try {
+          await proc.waitForPort(8080, {
+            mode: 'tcp',
+            timeout: 30000,
+            interval: 250
           });
+        } catch (e: any) {
+          error = e?.message || String(e);
         }
 
-        // Start the echo server and wait until its target port accepts connections.
-        const results = await Promise.allSettled(
-          serversToStart.map(async (server) => {
-            const process = await server.start;
-            await process.waitForPort(server.port, {
-              mode: 'tcp',
-              timeout: 30000,
-              interval: 250
-            });
-            return server.name;
-          })
-        );
-
-        const failedCount = results.filter(
-          (r) => r.status === 'rejected'
-        ).length;
-        const succeededCount = results.filter(
-          (r) => r.status === 'fulfilled'
-        ).length;
-
         const response: WebSocketInitResponse = {
-          success: failedCount === 0,
-          serversStarted: succeededCount,
-          serversFailed: failedCount,
-          errors:
-            failedCount > 0
-              ? results
-                  .filter((r) => r.status === 'rejected')
-                  .map(
-                    (r) =>
-                      (r as PromiseRejectedResult).reason?.message ||
-                      String((r as PromiseRejectedResult).reason)
-                  )
-              : undefined
+          success: !error,
+          serversStarted: error ? 0 : 1,
+          serversFailed: error ? 1 : 0,
+          errors: error ? [error] : undefined
         };
         return new Response(JSON.stringify(response), {
           headers: { 'Content-Type': 'application/json' },
-          status: failedCount > 0 ? 500 : 200
+          status: error ? 500 : 200
         });
       }
 
@@ -426,12 +388,24 @@ console.log('Echo server on port ' + port);
 
       // Command execution
       if (url.pathname === '/api/execute' && request.method === 'POST') {
-        const result = await executor.exec(body.command, {
-          env: body.env,
-          cwd: body.cwd,
-          timeout: body.timeout
+        const { command, timeout, env, cwd, stdin } = body;
+        const proc = await executor.exec(command, {
+          timeout,
+          env,
+          cwd,
+          stdin
         });
-        return new Response(JSON.stringify(result), {
+        const output = await proc.output();
+        const jsonResponse = {
+          success: output.exitCode === 0,
+          exitCode: output.exitCode,
+          stdout: new TextDecoder().decode(output.stdout),
+          stderr: new TextDecoder().decode(output.stderr),
+          command: typeof command === 'string' ? command : command.join(' '),
+          duration: 0,
+          timestamp: new Date().toISOString()
+        };
+        return new Response(JSON.stringify(jsonResponse), {
           headers: { 'Content-Type': 'application/json' }
         });
       }
@@ -627,170 +601,30 @@ console.log('Echo server on port ' + port);
         });
       }
 
-      // Process start
-      if (url.pathname === '/api/process/start' && request.method === 'POST') {
-        const process = await executor.startProcess(body.command, {
-          processId: body.processId,
-          env: body.env,
-          cwd: body.cwd,
-          timeout: body.timeout,
-          autoCleanup: body.autoCleanup
-        });
-        return new Response(JSON.stringify(process), {
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-
-      // Process waitForLog - waits for a log pattern
+      // Exec and wait for port
       if (
-        url.pathname.startsWith('/api/process/') &&
-        url.pathname.endsWith('/waitForLog') &&
+        url.pathname === '/api/exec-and-wait-for-port' &&
         request.method === 'POST'
       ) {
-        const pathParts = url.pathname.split('/');
-        const processId = pathParts[3];
-        const process = await executor.getProcess(processId);
-        if (!process) {
-          return new Response(JSON.stringify({ error: 'Process not found' }), {
-            status: 404,
-            headers: { 'Content-Type': 'application/json' }
-          });
-        }
-        // pattern can be string or regex pattern (as string starting with /)
-        let pattern = body.pattern;
-        if (
-          typeof pattern === 'string' &&
-          pattern.startsWith('/') &&
-          pattern.endsWith('/')
-        ) {
-          // Convert regex string to RegExp
-          pattern = new RegExp(pattern.slice(1, -1));
-        }
-        const result = await process.waitForLog(pattern, body.timeout);
-        return new Response(JSON.stringify(result), {
+        const { command, port } = body;
+        const proc = await sandbox.exec(command);
+        await proc.waitForPort(port, { timeout: 30000 });
+        return new Response(JSON.stringify({ pid: proc.pid, ready: true }), {
           headers: { 'Content-Type': 'application/json' }
         });
       }
 
-      // Process waitForPort - waits for a port to be available
+      // Kill running exec
       if (
-        url.pathname.startsWith('/api/process/') &&
-        url.pathname.endsWith('/waitForPort') &&
+        url.pathname === '/api/kill-running-exec' &&
         request.method === 'POST'
       ) {
-        const pathParts = url.pathname.split('/');
-        const processId = pathParts[3];
-        const process = await executor.getProcess(processId);
-        if (!process) {
-          return new Response(JSON.stringify({ error: 'Process not found' }), {
-            status: 404,
-            headers: { 'Content-Type': 'application/json' }
-          });
-        }
-        // Build WaitForPortOptions from request body.
-        // Accept both flat fields and nested `options` payloads.
-        const waitOptions =
-          body.options && typeof body.options === 'object'
-            ? body.options
-            : body;
-        await process.waitForPort(body.port, {
-          mode: waitOptions.mode,
-          path: waitOptions.path,
-          status: waitOptions.status,
-          timeout: waitOptions.timeout,
-          interval: waitOptions.interval
-        });
-        return new Response(JSON.stringify({ success: true }), {
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-
-      // Process waitForExit - waits for process to exit
-      if (
-        url.pathname.startsWith('/api/process/') &&
-        url.pathname.endsWith('/waitForExit') &&
-        request.method === 'POST'
-      ) {
-        const pathParts = url.pathname.split('/');
-        const processId = pathParts[3];
-        const process = await executor.getProcess(processId);
-        if (!process) {
-          return new Response(JSON.stringify({ error: 'Process not found' }), {
-            status: 404,
-            headers: { 'Content-Type': 'application/json' }
-          });
-        }
-        const result = await process.waitForExit(body.timeout);
-        return new Response(JSON.stringify(result), {
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-
-      // Process list
-      if (url.pathname === '/api/process/list' && request.method === 'GET') {
-        const processes = await executor.listProcesses();
-        return new Response(JSON.stringify(processes), {
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-
-      // Process get by ID
-      if (
-        url.pathname.startsWith('/api/process/') &&
-        request.method === 'GET'
-      ) {
-        const pathParts = url.pathname.split('/');
-        const processId = pathParts[3];
-
-        // Handle /api/process/:id/logs
-        if (pathParts[4] === 'logs') {
-          const logs = await executor.getProcessLogs(processId);
-          return new Response(JSON.stringify(logs), {
-            headers: { 'Content-Type': 'application/json' }
-          });
-        }
-
-        // Handle /api/process/:id/stream (SSE)
-        if (pathParts[4] === 'stream') {
-          const stream = await executor.streamProcessLogs(processId);
-
-          return new Response(stream, {
-            headers: {
-              'Content-Type': 'text/event-stream',
-              'Cache-Control': 'no-cache',
-              Connection: 'keep-alive'
-            }
-          });
-        }
-
-        // Handle /api/process/:id (get single process)
-        if (!pathParts[4]) {
-          const process = await executor.getProcess(processId);
-          return new Response(JSON.stringify(process), {
-            headers: { 'Content-Type': 'application/json' }
-          });
-        }
-      }
-
-      // Process kill by ID
-      if (
-        url.pathname.startsWith('/api/process/') &&
-        request.method === 'DELETE'
-      ) {
-        const processId = url.pathname.split('/')[3];
-        await executor.killProcess(processId);
-        return new Response(JSON.stringify({ success: true }), {
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-
-      // Kill all processes
-      if (
-        url.pathname === '/api/process/kill-all' &&
-        request.method === 'POST'
-      ) {
-        await executor.killAllProcesses();
-        return new Response(JSON.stringify({ success: true }), {
+        const { command } = body;
+        const proc = await sandbox.exec(command);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        await proc.kill();
+        const exitCode = await proc.exitCode;
+        return new Response(JSON.stringify({ exitCode }), {
           headers: { 'Content-Type': 'application/json' }
         });
       }

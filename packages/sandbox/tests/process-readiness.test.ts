@@ -1,7 +1,7 @@
 /**
  * Unit tests for process readiness feature
  *
- * Tests the waitForLog() and waitForPort() functionality
+ * Tests the waitForPort() functionality
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -49,6 +49,15 @@ vi.mock('@cloudflare/containers', () => {
     switchPort: vi.fn()
   };
 });
+
+function textStream(text: string): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(text));
+      controller.close();
+    }
+  });
+}
 
 describe('Process Readiness Feature', () => {
   let sandbox: Sandbox;
@@ -103,378 +112,6 @@ describe('Process Readiness Feature', () => {
     vi.restoreAllMocks();
   });
 
-  describe('waitForLog() method', () => {
-    describe('string pattern matching', () => {
-      it('should resolve when string pattern found in existing logs', async () => {
-        vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          pid: 12345,
-          command: 'npm start',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        vi.spyOn(sandbox.client.processes, 'getProcess').mockResolvedValue({
-          success: true,
-          process: {
-            id: 'proc-server',
-            pid: 12345,
-            command: 'npm start',
-            status: 'running',
-            startTime: new Date().toISOString()
-          },
-          timestamp: new Date().toISOString()
-        } as any);
-
-        vi.spyOn(sandbox.client.processes, 'getProcessLogs').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          stdout:
-            'Compiling...\nServer listening on port 3000\nReady to accept connections',
-          stderr: '',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        const proc = await sandbox.startProcess('npm start');
-        const result = await proc.waitForLog('Server listening on port 3000');
-
-        expect(result.line).toContain('Server listening on port 3000');
-      });
-
-      it('should find pattern via streaming when not in historical logs', async () => {
-        vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          pid: 12345,
-          command: 'npm start',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        vi.spyOn(sandbox.client.processes, 'getProcess').mockResolvedValue({
-          success: true,
-          process: {
-            id: 'proc-server',
-            pid: 12345,
-            command: 'npm start',
-            status: 'running',
-            startTime: new Date().toISOString()
-          },
-          timestamp: new Date().toISOString()
-        } as any);
-
-        // First call returns logs without the pattern
-        vi.spyOn(sandbox.client.processes, 'getProcessLogs').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          stdout: 'Starting server...',
-          stderr: '',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        // Mock streaming to emit the pattern
-        const sseData = `data: {"type":"stdout","data":"Server ready on port 3000\\n","timestamp":"${new Date().toISOString()}"}
-
-`;
-        const mockStream = new ReadableStream({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode(sseData));
-            controller.close();
-          }
-        });
-
-        vi.spyOn(
-          sandbox.client.processes,
-          'streamProcessLogs'
-        ).mockResolvedValue(mockStream);
-
-        const proc = await sandbox.startProcess('npm start');
-        const result = await proc.waitForLog('Server ready on port 3000');
-
-        expect(result.line).toBe('Server ready on port 3000');
-      });
-
-      it('should find pattern that spans multiple SSE chunks', async () => {
-        vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          pid: 12345,
-          command: 'npm start',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        // Mock empty historical logs
-        vi.spyOn(sandbox.client.processes, 'getProcessLogs').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          stdout: '',
-          stderr: '',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        // Simulate pattern split across multiple SSE chunks:
-        // "Server listen" in chunk 1, "ing on port 3000" in chunk 2
-        const sseChunk1 = `data: {"type":"stdout","data":"Server listen","timestamp":"${new Date().toISOString()}"}\n\n`;
-        const sseChunk2 = `data: {"type":"stdout","data":"ing on port 3000\\n","timestamp":"${new Date().toISOString()}"}\n\n`;
-
-        const mockStream = new ReadableStream({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode(sseChunk1));
-            controller.enqueue(new TextEncoder().encode(sseChunk2));
-            controller.close();
-          }
-        });
-
-        vi.spyOn(
-          sandbox.client.processes,
-          'streamProcessLogs'
-        ).mockResolvedValue(mockStream);
-
-        const proc = await sandbox.startProcess('npm start');
-        const result = await proc.waitForLog('Server listening on port 3000');
-
-        // Should find the pattern even though it was split across chunks
-        expect(result.line).toBe('Server listening on port 3000');
-      });
-    });
-
-    describe('regex pattern matching', () => {
-      it('should resolve with match details when regex matches', async () => {
-        vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          pid: 12345,
-          command: 'npm start',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        vi.spyOn(sandbox.client.processes, 'getProcess').mockResolvedValue({
-          success: true,
-          process: {
-            id: 'proc-server',
-            pid: 12345,
-            command: 'npm start',
-            status: 'running',
-            startTime: new Date().toISOString()
-          },
-          timestamp: new Date().toISOString()
-        } as any);
-
-        vi.spyOn(sandbox.client.processes, 'getProcessLogs').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          stdout: 'Server listening on port 8080',
-          stderr: '',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        const proc = await sandbox.startProcess('npm start');
-        const result = await proc.waitForLog(/port (\d+)/);
-
-        expect(result.match).toBeDefined();
-        expect(result.match![0]).toBe('port 8080');
-        expect(result.match![1]).toBe('8080');
-      });
-    });
-
-    describe('timeout handling', () => {
-      it('should throw ProcessReadyTimeoutError when pattern not found within timeout', async () => {
-        vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          pid: 12345,
-          command: 'npm start',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        vi.spyOn(sandbox.client.processes, 'getProcess').mockResolvedValue({
-          success: true,
-          process: {
-            id: 'proc-server',
-            pid: 12345,
-            command: 'npm start',
-            status: 'running',
-            startTime: new Date().toISOString()
-          },
-          timestamp: new Date().toISOString()
-        } as any);
-
-        vi.spyOn(sandbox.client.processes, 'getProcessLogs').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          stdout: 'Starting...',
-          stderr: 'Warning: something',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        // Create a stream that stays open longer than the timeout
-        // This ensures timeout fires before stream ends
-        const mockStream = new ReadableStream({
-          start(controller) {
-            // Keep stream open - never close it
-            // The timeout will fire before this stream ends
-          }
-        });
-
-        vi.spyOn(
-          sandbox.client.processes,
-          'streamProcessLogs'
-        ).mockResolvedValue(mockStream);
-
-        const proc = await sandbox.startProcess('npm start');
-
-        await expect(proc.waitForLog('never-appears', 100)).rejects.toThrow(
-          ProcessReadyTimeoutError
-        );
-      });
-
-      it('should include process info in timeout error', async () => {
-        vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          pid: 12345,
-          command: 'npm start',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        vi.spyOn(sandbox.client.processes, 'getProcess').mockResolvedValue({
-          success: true,
-          process: {
-            id: 'proc-server',
-            pid: 12345,
-            command: 'npm start',
-            status: 'running',
-            startTime: new Date().toISOString()
-          },
-          timestamp: new Date().toISOString()
-        } as any);
-
-        vi.spyOn(sandbox.client.processes, 'getProcessLogs').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          stdout: 'Output line 1\nOutput line 2',
-          stderr: 'Error occurred',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        // Create a stream that stays open longer than the timeout
-        const mockStream = new ReadableStream({
-          start(controller) {
-            // Keep stream open - timeout will fire first
-          }
-        });
-
-        vi.spyOn(
-          sandbox.client.processes,
-          'streamProcessLogs'
-        ).mockResolvedValue(mockStream);
-
-        const proc = await sandbox.startProcess('npm start');
-
-        try {
-          await proc.waitForLog('never-found', 100);
-          expect.fail('Should have thrown');
-        } catch (error) {
-          expect(error).toBeInstanceOf(ProcessReadyTimeoutError);
-          const readyError = error as ProcessReadyTimeoutError;
-          expect(readyError.processId).toBe('proc-server');
-          expect(readyError.command).toBe('npm start');
-        }
-      });
-    });
-
-    describe('process exit handling', () => {
-      it('should throw ProcessExitedBeforeReadyError when process exits', async () => {
-        vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          pid: 12345,
-          command: 'npm start',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        vi.spyOn(sandbox.client.processes, 'getProcessLogs').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          stdout: 'Starting...',
-          stderr: 'Error: port in use',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        // Mock stream to emit an exit event
-        const sseData = `data: {"type":"stdout","data":"Starting...\\n","timestamp":"${new Date().toISOString()}"}
-
-data: {"type":"exit","exitCode":1,"timestamp":"${new Date().toISOString()}"}
-
-`;
-        const mockStream = new ReadableStream({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode(sseData));
-            controller.close();
-          }
-        });
-
-        vi.spyOn(
-          sandbox.client.processes,
-          'streamProcessLogs'
-        ).mockResolvedValue(mockStream);
-
-        const proc = await sandbox.startProcess('npm start');
-
-        await expect(proc.waitForLog('Server ready')).rejects.toThrow(
-          ProcessExitedBeforeReadyError
-        );
-      });
-
-      it('should include exit code and logs in exit error', async () => {
-        vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          pid: 12345,
-          command: 'npm start',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        vi.spyOn(sandbox.client.processes, 'getProcessLogs').mockResolvedValue({
-          success: true,
-          processId: 'proc-server',
-          stdout: '',
-          stderr: 'command not found: npm',
-          timestamp: new Date().toISOString()
-        } as any);
-
-        // Mock stream to emit exit event with specific exit code
-        const sseData = `data: {"type":"stderr","data":"command not found: npm\\n","timestamp":"${new Date().toISOString()}"}
-
-data: {"type":"exit","exitCode":127,"timestamp":"${new Date().toISOString()}"}
-
-`;
-        const mockStream = new ReadableStream({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode(sseData));
-            controller.close();
-          }
-        });
-
-        vi.spyOn(
-          sandbox.client.processes,
-          'streamProcessLogs'
-        ).mockResolvedValue(mockStream);
-
-        const proc = await sandbox.startProcess('npm start');
-
-        try {
-          await proc.waitForLog('Server ready');
-          expect.fail('Should have thrown');
-        } catch (error) {
-          expect(error).toBeInstanceOf(ProcessExitedBeforeReadyError);
-          const exitError = error as ProcessExitedBeforeReadyError;
-          expect(exitError.exitCode).toBe(127);
-          expect(exitError.processId).toBe('proc-server');
-        }
-      });
-    });
-  });
-
   describe('waitForPort() method', () => {
     // Helper to create an SSE stream with events
     function createPortWatchStream(
@@ -497,26 +134,30 @@ data: {"type":"exit","exitCode":127,"timestamp":"${new Date().toISOString()}"}
       });
     }
 
-    it('should wait for port to become available with HTTP mode (default)', async () => {
-      vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-        success: true,
-        processId: 'proc-server',
+    function setupNativeExec(
+      exitCodePromise: Promise<number> = new Promise<number>(() => {})
+    ) {
+      const nativeProcessMock = {
+        stdin: null,
+        stdout: textStream(''),
+        stderr: textStream(''),
         pid: 12345,
-        command: 'npm start',
-        timestamp: new Date().toISOString()
-      } as any);
+        exitCode: exitCodePromise,
+        output: async () => ({
+          stdout: new ArrayBuffer(0),
+          stderr: new ArrayBuffer(0),
+          exitCode: 0
+        }),
+        kill: vi.fn()
+      };
+      const nativeExec = vi.fn(async () => nativeProcessMock);
+      Object.assign((sandbox as any).ctx, {
+        container: { running: true, exec: nativeExec }
+      });
+    }
 
-      vi.spyOn(sandbox.client.processes, 'getProcess').mockResolvedValue({
-        success: true,
-        process: {
-          id: 'proc-server',
-          pid: 12345,
-          command: 'npm start',
-          status: 'running',
-          startTime: new Date().toISOString()
-        },
-        timestamp: new Date().toISOString()
-      } as any);
+    it('should wait for port to become available with HTTP mode (default)', async () => {
+      setupNativeExec();
 
       const mockStream = createPortWatchStream([
         { type: 'watching', port: 3000 },
@@ -524,40 +165,21 @@ data: {"type":"exit","exitCode":127,"timestamp":"${new Date().toISOString()}"}
       ]);
       vi.spyOn(sandbox.client.ports, 'watchPort').mockResolvedValue(mockStream);
 
-      const proc = await sandbox.startProcess('npm start');
+      const proc = await sandbox.exec('npm start');
       await proc.waitForPort(3000);
 
       expect(sandbox.client.ports.watchPort).toHaveBeenCalledWith({
         port: 3000,
         mode: 'http',
-        path: '/',
-        statusMin: 200,
-        statusMax: 399,
-        processId: 'proc-server',
-        interval: 500
+        path: undefined,
+        statusMin: undefined,
+        statusMax: undefined,
+        interval: undefined
       });
     });
 
     it('should support TCP mode for non-HTTP services', async () => {
-      vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-        success: true,
-        processId: 'proc-db',
-        pid: 12345,
-        command: 'postgres',
-        timestamp: new Date().toISOString()
-      } as any);
-
-      vi.spyOn(sandbox.client.processes, 'getProcess').mockResolvedValue({
-        success: true,
-        process: {
-          id: 'proc-db',
-          pid: 12345,
-          command: 'postgres',
-          status: 'running',
-          startTime: new Date().toISOString()
-        },
-        timestamp: new Date().toISOString()
-      } as any);
+      setupNativeExec();
 
       const mockStream = createPortWatchStream([
         { type: 'watching', port: 5432 },
@@ -565,40 +187,21 @@ data: {"type":"exit","exitCode":127,"timestamp":"${new Date().toISOString()}"}
       ]);
       vi.spyOn(sandbox.client.ports, 'watchPort').mockResolvedValue(mockStream);
 
-      const proc = await sandbox.startProcess('postgres');
+      const proc = await sandbox.exec('postgres');
       await proc.waitForPort(5432, { mode: 'tcp' });
 
       expect(sandbox.client.ports.watchPort).toHaveBeenCalledWith({
         port: 5432,
         mode: 'tcp',
-        path: '/',
-        statusMin: 200,
-        statusMax: 399,
-        processId: 'proc-db',
-        interval: 500
+        path: undefined,
+        statusMin: undefined,
+        statusMax: undefined,
+        interval: undefined
       });
     });
 
     it('should support custom health check path', async () => {
-      vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-        success: true,
-        processId: 'proc-server',
-        pid: 12345,
-        command: 'npm start',
-        timestamp: new Date().toISOString()
-      } as any);
-
-      vi.spyOn(sandbox.client.processes, 'getProcess').mockResolvedValue({
-        success: true,
-        process: {
-          id: 'proc-server',
-          pid: 12345,
-          command: 'npm start',
-          status: 'running',
-          startTime: new Date().toISOString()
-        },
-        timestamp: new Date().toISOString()
-      } as any);
+      setupNativeExec();
 
       const mockStream = createPortWatchStream([
         { type: 'watching', port: 3000 },
@@ -606,7 +209,7 @@ data: {"type":"exit","exitCode":127,"timestamp":"${new Date().toISOString()}"}
       ]);
       vi.spyOn(sandbox.client.ports, 'watchPort').mockResolvedValue(mockStream);
 
-      const proc = await sandbox.startProcess('npm start');
+      const proc = await sandbox.exec('npm start');
       await proc.waitForPort(3000, { path: '/health', status: 200 });
 
       expect(sandbox.client.ports.watchPort).toHaveBeenCalledWith({
@@ -615,31 +218,16 @@ data: {"type":"exit","exitCode":127,"timestamp":"${new Date().toISOString()}"}
         path: '/health',
         statusMin: 200,
         statusMax: 200,
-        processId: 'proc-server',
-        interval: 500
+        interval: undefined
       });
     });
 
     it('should throw ProcessExitedBeforeReadyError when process exits before port is ready', async () => {
-      vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-        success: true,
-        processId: 'proc-server',
-        pid: 12345,
-        command: 'npm start',
-        timestamp: new Date().toISOString()
-      } as any);
-
-      vi.spyOn(sandbox.client.processes, 'getProcess').mockResolvedValue({
-        success: true,
-        process: {
-          id: 'proc-server',
-          pid: 12345,
-          command: 'npm start',
-          status: 'running',
-          startTime: new Date().toISOString()
-        },
-        timestamp: new Date().toISOString()
-      } as any);
+      let resolveExitCode: (code: number) => void = () => {};
+      const exitCodePromise = new Promise<number>((resolve) => {
+        resolveExitCode = resolve;
+      });
+      setupNativeExec(exitCodePromise);
 
       // Stream emits process_exited event
       const mockStream = createPortWatchStream([
@@ -648,7 +236,8 @@ data: {"type":"exit","exitCode":127,"timestamp":"${new Date().toISOString()}"}
       ]);
       vi.spyOn(sandbox.client.ports, 'watchPort').mockResolvedValue(mockStream);
 
-      const proc = await sandbox.startProcess('npm start');
+      const proc = await sandbox.exec('npm start');
+      resolveExitCode(1);
 
       try {
         await proc.waitForPort(3000);
@@ -656,30 +245,13 @@ data: {"type":"exit","exitCode":127,"timestamp":"${new Date().toISOString()}"}
       } catch (error) {
         expect(error).toBeInstanceOf(ProcessExitedBeforeReadyError);
         const exitError = error as ProcessExitedBeforeReadyError;
-        expect(exitError.condition).toBe('port 3000 (HTTP /)');
+        expect(exitError.condition).toBe('port 3000');
       }
     });
 
     it('should throw ProcessReadyTimeoutError when port does not become ready', async () => {
-      vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-        success: true,
-        processId: 'proc-server',
-        pid: 12345,
-        command: 'npm start',
-        timestamp: new Date().toISOString()
-      } as any);
-
-      vi.spyOn(sandbox.client.processes, 'getProcess').mockResolvedValue({
-        success: true,
-        process: {
-          id: 'proc-server',
-          pid: 12345,
-          command: 'npm start',
-          status: 'running',
-          startTime: new Date().toISOString()
-        },
-        timestamp: new Date().toISOString()
-      } as any);
+      const exitCodePromise = new Promise<number>(() => {}); // never exits
+      setupNativeExec(exitCodePromise);
 
       // Stream that stays open (never emits ready or exit events)
       const mockStream = new ReadableStream<Uint8Array>({
@@ -691,7 +263,7 @@ data: {"type":"exit","exitCode":127,"timestamp":"${new Date().toISOString()}"}
       });
       vi.spyOn(sandbox.client.ports, 'watchPort').mockResolvedValue(mockStream);
 
-      const proc = await sandbox.startProcess('npm start');
+      const proc = await sandbox.exec('npm start');
 
       try {
         await proc.waitForPort(3000, { timeout: 100, interval: 50 });
@@ -699,256 +271,7 @@ data: {"type":"exit","exitCode":127,"timestamp":"${new Date().toISOString()}"}
       } catch (error) {
         expect(error).toBeInstanceOf(ProcessReadyTimeoutError);
         const timeoutError = error as ProcessReadyTimeoutError;
-        expect(timeoutError.processId).toBe('proc-server');
-        expect(timeoutError.condition).toBe('port 3000 (HTTP /)');
-      }
-    });
-  });
-
-  describe('waitForExit() method', () => {
-    it('should resolve when process exits successfully', async () => {
-      vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-        success: true,
-        processId: 'proc-build',
-        pid: 12345,
-        command: 'npm run build',
-        timestamp: new Date().toISOString()
-      } as any);
-
-      // Mock stream that emits exit event with code 0
-      const sseData = `data: {"type":"exit","exitCode":0,"timestamp":"${new Date().toISOString()}"}\n\n`;
-      const mockStream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode(sseData));
-          controller.close();
-        }
-      });
-
-      vi.spyOn(sandbox.client.processes, 'streamProcessLogs').mockResolvedValue(
-        mockStream
-      );
-
-      const proc = await sandbox.startProcess('npm run build');
-      const result = await proc.waitForExit();
-
-      expect(result.exitCode).toBe(0);
-    });
-
-    it('should return non-zero exit code when process fails', async () => {
-      vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-        success: true,
-        processId: 'proc-build',
-        pid: 12345,
-        command: 'npm run build',
-        timestamp: new Date().toISOString()
-      } as any);
-
-      // Mock stream that emits exit event with code 1
-      const sseData = `data: {"type":"exit","exitCode":1,"timestamp":"${new Date().toISOString()}"}\n\n`;
-      const mockStream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode(sseData));
-          controller.close();
-        }
-      });
-
-      vi.spyOn(sandbox.client.processes, 'streamProcessLogs').mockResolvedValue(
-        mockStream
-      );
-
-      const proc = await sandbox.startProcess('npm run build');
-      const result = await proc.waitForExit();
-
-      expect(result.exitCode).toBe(1);
-    });
-
-    it('should wait for exit event in stream', async () => {
-      vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-        success: true,
-        processId: 'proc-build',
-        pid: 12345,
-        command: 'npm run build',
-        timestamp: new Date().toISOString()
-      } as any);
-
-      // Mock stream that emits some log events before exit
-      const sseData = `data: {"type":"stdout","data":"Building...\\n","timestamp":"${new Date().toISOString()}"}\n\ndata: {"type":"stdout","data":"Done!\\n","timestamp":"${new Date().toISOString()}"}\n\ndata: {"type":"exit","exitCode":0,"timestamp":"${new Date().toISOString()}"}\n\n`;
-      const mockStream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode(sseData));
-          controller.close();
-        }
-      });
-
-      vi.spyOn(sandbox.client.processes, 'streamProcessLogs').mockResolvedValue(
-        mockStream
-      );
-
-      const proc = await sandbox.startProcess('npm run build');
-      const result = await proc.waitForExit();
-
-      expect(result.exitCode).toBe(0);
-    });
-
-    it('should throw ProcessReadyTimeoutError when timeout exceeded', async () => {
-      vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-        success: true,
-        processId: 'proc-long',
-        pid: 12345,
-        command: 'sleep 1000',
-        timestamp: new Date().toISOString()
-      } as any);
-
-      // Mock stream that never emits exit event
-      const mockStream = new ReadableStream({
-        start() {
-          // Never close - simulates long-running process
-        }
-      });
-
-      vi.spyOn(sandbox.client.processes, 'streamProcessLogs').mockResolvedValue(
-        mockStream
-      );
-
-      const proc = await sandbox.startProcess('sleep 1000');
-
-      await expect(proc.waitForExit(100)).rejects.toThrow(
-        ProcessReadyTimeoutError
-      );
-    });
-
-    it('should throw error when stream ends without exit event', async () => {
-      vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-        success: true,
-        processId: 'proc-build',
-        pid: 12345,
-        command: 'npm run build',
-        timestamp: new Date().toISOString()
-      } as any);
-
-      // Mock stream that closes without exit event
-      const mockStream = new ReadableStream({
-        start(controller) {
-          controller.close();
-        }
-      });
-
-      vi.spyOn(sandbox.client.processes, 'streamProcessLogs').mockResolvedValue(
-        mockStream
-      );
-
-      const proc = await sandbox.startProcess('npm run build');
-
-      await expect(proc.waitForExit()).rejects.toThrow(
-        'stream ended unexpectedly'
-      );
-    });
-  });
-
-  describe('conditionToString helper', () => {
-    it('should format string conditions as quoted strings', async () => {
-      vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-        success: true,
-        processId: 'proc-server',
-        pid: 12345,
-        command: 'npm start',
-        timestamp: new Date().toISOString()
-      } as any);
-
-      vi.spyOn(sandbox.client.processes, 'getProcess').mockResolvedValue({
-        success: true,
-        process: {
-          id: 'proc-server',
-          pid: 12345,
-          command: 'npm start',
-          status: 'running',
-          startTime: new Date().toISOString()
-        },
-        timestamp: new Date().toISOString()
-      } as any);
-
-      vi.spyOn(sandbox.client.processes, 'getProcessLogs').mockResolvedValue({
-        success: true,
-        processId: 'proc-server',
-        stdout: 'no match here',
-        stderr: '',
-        timestamp: new Date().toISOString()
-      } as any);
-
-      // Stream that closes immediately (simulates process exit)
-      const mockStream = new ReadableStream({
-        start(controller) {
-          controller.close();
-        }
-      });
-
-      vi.spyOn(sandbox.client.processes, 'streamProcessLogs').mockResolvedValue(
-        mockStream
-      );
-
-      const proc = await sandbox.startProcess('npm start');
-
-      try {
-        await proc.waitForLog('Server ready');
-        expect.fail('Should have thrown');
-      } catch (error) {
-        // Stream ending means process exited
-        expect(error).toBeInstanceOf(ProcessExitedBeforeReadyError);
-        const exitError = error as ProcessExitedBeforeReadyError;
-        expect(exitError.condition).toBe('"Server ready"');
-      }
-    });
-
-    it('should format regex conditions with regex syntax', async () => {
-      vi.spyOn(sandbox.client.processes, 'startProcess').mockResolvedValue({
-        success: true,
-        processId: 'proc-server',
-        pid: 12345,
-        command: 'npm start',
-        timestamp: new Date().toISOString()
-      } as any);
-
-      vi.spyOn(sandbox.client.processes, 'getProcess').mockResolvedValue({
-        success: true,
-        process: {
-          id: 'proc-server',
-          pid: 12345,
-          command: 'npm start',
-          status: 'running',
-          startTime: new Date().toISOString()
-        },
-        timestamp: new Date().toISOString()
-      } as any);
-
-      vi.spyOn(sandbox.client.processes, 'getProcessLogs').mockResolvedValue({
-        success: true,
-        processId: 'proc-server',
-        stdout: 'no match here',
-        stderr: '',
-        timestamp: new Date().toISOString()
-      } as any);
-
-      // Stream that closes immediately (simulates process exit)
-      const mockStream = new ReadableStream({
-        start(controller) {
-          controller.close();
-        }
-      });
-
-      vi.spyOn(sandbox.client.processes, 'streamProcessLogs').mockResolvedValue(
-        mockStream
-      );
-
-      const proc = await sandbox.startProcess('npm start');
-
-      try {
-        await proc.waitForLog(/port \d+/);
-        expect.fail('Should have thrown');
-      } catch (error) {
-        // Stream ending means process exited
-        expect(error).toBeInstanceOf(ProcessExitedBeforeReadyError);
-        const exitError = error as ProcessExitedBeforeReadyError;
-        expect(exitError.condition).toBe('/port \\d+/');
+        expect(timeoutError.condition).toBe('port 3000');
       }
     });
   });

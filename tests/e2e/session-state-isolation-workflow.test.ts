@@ -1,10 +1,8 @@
 import type {
   ExecResult,
-  Process,
   ReadFileResult,
   SessionCreateResult,
-  SessionDeleteResult,
-  WaitForExitResult
+  SessionDeleteResult
 } from '@repo/shared';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import {
@@ -402,55 +400,46 @@ describe('Session State Isolation Workflow', () => {
     const session2Data = (await session2Response.json()) as SessionCreateResult;
     const session2Id = session2Data.sessionId;
 
-    // Start a long-running process in session1
-    const startResponse = await fetch(`${workerUrl}/api/process/start`, {
+    // Start a long-running process in session1 background
+    await fetch(`${workerUrl}/api/execute`, {
       method: 'POST',
       headers: createTestHeaders(sandboxId, session1Id),
       body: JSON.stringify({
-        command: 'sleep 120'
+        command: 'sleep 120 &'
       })
     });
 
-    expect(startResponse.status).toBe(200);
-    const startData = (await startResponse.json()) as Process;
-    const processId = startData.id;
-
-    // List processes from session2 - startProcess returns after registration,
-    // so process is immediately visible (shared process table)
-    const listResponse = await fetch(`${workerUrl}/api/process/list`, {
-      method: 'GET',
-      headers: createTestHeaders(sandboxId, session2Id)
+    // List processes from session2 using ps
+    const listResponse = await fetch(`${workerUrl}/api/execute`, {
+      method: 'POST',
+      headers: createTestHeaders(sandboxId, session2Id),
+      body: JSON.stringify({
+        command: 'ps -ef'
+      })
     });
     expect(listResponse.status).toBe(200);
-    const processes = (await listResponse.json()) as Process[];
-    expect(Array.isArray(processes)).toBe(true);
-    const ourProcess = processes.find((p) => p.id === processId);
+    const listData = (await listResponse.json()) as ExecResult;
+    expect(listData.stdout).toContain('sleep 120');
 
-    expect(ourProcess).toBeTruthy();
-    if (!ourProcess) throw new Error('Process not found');
-
-    expect(ourProcess.status).toBe('running');
-
-    // Kill the process from session2 - should work (shared process table)
-    const killResponse = await fetch(`${workerUrl}/api/process/${processId}`, {
-      method: 'DELETE',
-      headers: createTestHeaders(sandboxId, session2Id)
+    // Kill the sleep 120 process from session2
+    await fetch(`${workerUrl}/api/execute`, {
+      method: 'POST',
+      headers: createTestHeaders(sandboxId, session2Id),
+      body: JSON.stringify({
+        command: 'pkill -f "sleep 120"'
+      })
     });
 
-    expect(killResponse.status).toBe(200);
-
-    // Wait for process to exit (check from session1)
-    const waitExitResponse = await fetch(
-      `${workerUrl}/api/process/${processId}/waitForExit`,
-      {
-        method: 'POST',
-        headers: createTestHeaders(sandboxId, session1Id),
-        body: JSON.stringify({ timeout: 5000 })
-      }
-    );
-    expect(waitExitResponse.status).toBe(200);
-    const exitResult = (await waitExitResponse.json()) as WaitForExitResult;
-    expect(exitResult.exitCode).toBeDefined();
+    // Verify it is gone
+    const verifyListResponse = await fetch(`${workerUrl}/api/execute`, {
+      method: 'POST',
+      headers: createTestHeaders(sandboxId, session2Id),
+      body: JSON.stringify({
+        command: 'ps -ef'
+      })
+    });
+    const verifyListData = (await verifyListResponse.json()) as ExecResult;
+    expect(verifyListData.stdout).not.toContain('sleep 120');
   }, 90000);
 
   test('should share file system between sessions (by design)', async () => {
