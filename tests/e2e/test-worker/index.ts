@@ -274,8 +274,8 @@ console.log('Echo server on port ' + port);
             timeout: 30000,
             interval: 250
           });
-        } catch (e: any) {
-          error = e?.message || String(e);
+        } catch (e: unknown) {
+          error = e instanceof Error ? e.message : String(e);
         }
 
         const response: WebSocketInitResponse = {

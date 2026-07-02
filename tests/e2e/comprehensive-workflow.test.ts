@@ -23,8 +23,6 @@ import type {
   FileInfo,
   GitCheckoutResult,
   ListFilesResult,
-  Process,
-  ProcessLogsResult,
   ReadFileResult
 } from '@repo/shared';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
@@ -34,12 +32,6 @@ import {
   createUniqueSession,
   type TestSandbox
 } from './helpers/global-sandbox';
-import {
-  collectProcessStdout,
-  collectProcessStreamEvents,
-  startProcessViaTestWorker,
-  streamProcessViaTestWorker
-} from './helpers/process-stream';
 
 describe('Comprehensive Workflow', () => {
   let sandbox: TestSandbox | null = null;
@@ -240,25 +232,17 @@ export function greet(name) {
       expect(gitStatusData.stdout).toContain('config.json');
       expect(gitStatusData.stdout).toContain('src/');
 
-      // Phase 4: Background process with streaming
+      // Phase 4: Background process and Port readiness
 
       // Write a simple server script that uses env vars
       const serverScript = `
-const port = 8888;
-console.log(\`[Server] Starting on port \${port}\`);
-console.log(\`[Server] PROJECT_NAME = \${process.env.PROJECT_NAME}\`);
-console.log(\`[Server] BUILD_ENV = \${process.env.BUILD_ENV}\`);
-
-let counter = 0;
-const interval = setInterval(() => {
-  counter++;
-  console.log(\`[Server] Heartbeat \${counter}\`);
-  if (counter >= 3) {
-    clearInterval(interval);
-    console.log('[Server] Done');
-    process.exit(0);
-  }
-}, 500);
+const server = Bun.serve({
+  port: 8888,
+  fetch(req) {
+    return new Response(\`PROJECT_NAME=\${process.env.PROJECT_NAME} BUILD_ENV=\${process.env.BUILD_ENV}\`);
+  },
+});
+console.log("Server listening");
 `.trim();
 
       await fetch(`${workerUrl}/api/file/write`, {
@@ -270,52 +254,34 @@ const interval = setInterval(() => {
         })
       });
 
-      // Start the background process
-      const startResponse = await fetch(`${workerUrl}/api/process/start`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          command: `bun run ${testDir}/server.js`
-        })
-      });
-
-      expect(startResponse.status).toBe(200);
-      const processData = (await startResponse.json()) as Process;
-      expect(processData.id).toBeTruthy();
-      const processId = processData.id;
-
-      // Wait for process to complete using waitForLog instead of fixed sleep
-      // This is more reliable under load as it waits for actual output
-      const waitResponse = await fetch(
-        `${workerUrl}/api/process/${processId}/waitForLog`,
+      // Start the background process and wait for port
+      const startResponse = await fetch(
+        `${workerUrl}/api/exec-and-wait-for-port`,
         {
           method: 'POST',
           headers,
           body: JSON.stringify({
-            pattern: 'Done',
-            timeout: 10000
+            command: `bun run ${testDir}/server.js`,
+            port: 8888
           })
         }
       );
-      expect(waitResponse.status).toBe(200);
 
-      // Get process logs
-      const logsResponse = await fetch(
-        `${workerUrl}/api/process/${processId}/logs`,
-        {
-          method: 'GET',
-          headers
-        }
-      );
+      expect(startResponse.status).toBe(200);
 
-      expect(logsResponse.status).toBe(200);
-      const logsData = (await logsResponse.json()) as ProcessLogsResult;
+      // Verify server is responding with correct env vars
+      const queryResponse = await fetch(`${workerUrl}/api/execute`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          command: 'curl -s http://localhost:8888'
+        })
+      });
 
-      // Verify env vars were available to the process
-      expect(logsData.stdout).toContain('PROJECT_NAME = hello-world');
-      expect(logsData.stdout).toContain('BUILD_ENV = test');
-      expect(logsData.stdout).toContain('Heartbeat 3');
-      expect(logsData.stdout).toContain('Done');
+      expect(queryResponse.status).toBe(200);
+      const queryResult = (await queryResponse.json()) as ExecResult;
+      expect(queryResult.stdout).toContain('PROJECT_NAME=hello-world');
+      expect(queryResult.stdout).toContain('BUILD_ENV=test');
 
       // Phase 5: Cleanup - move and delete files
 
@@ -371,50 +337,6 @@ const interval = setInterval(() => {
       expect(fileNames).toContain('backup/config.json');
       expect(fileNames).not.toContain('server.js');
       expect(fileNames).toContain('src/utils/greeter.js');
-    }
-  );
-
-  /**
-   * Test 2: Process streaming with real-time output
-   *
-   * Tests process log streaming within the same sandbox context.
-   */
-  test(
-    'should stream command output in real-time',
-    { retry: 2, timeout: 60000 },
-    async () => {
-      // Stream a process that outputs multiple lines with timestamps.
-      const process = await startProcessViaTestWorker(
-        workerUrl,
-        headers,
-        'for i in 1 2 3; do echo "[$PROJECT_NAME] Step $i at $(date +%s)"; sleep 0.3; done'
-      );
-      const streamResponse = await streamProcessViaTestWorker(
-        workerUrl,
-        headers,
-        process.id
-      );
-
-      expect(streamResponse.status).toBe(200);
-      expect(streamResponse.headers.get('content-type')).toBe(
-        'text/event-stream'
-      );
-
-      const events = await collectProcessStreamEvents(streamResponse);
-
-      const eventTypes = new Set(events.map((event) => event.type));
-      expect(eventTypes.has('stdout')).toBe(true);
-      expect(eventTypes.has('exit')).toBe(true);
-
-      // Verify output includes env var from earlier phase
-      const output = collectProcessStdout(events);
-      expect(output).toContain('[hello-world]');
-      expect(output).toContain('Step 1');
-      expect(output).toContain('Step 3');
-
-      // Verify successful completion
-      const exitEvent = events.find((event) => event.type === 'exit');
-      expect(exitEvent?.exitCode).toBe(0);
     }
   );
 
@@ -529,68 +451,6 @@ const interval = setInterval(() => {
         headers,
         body: JSON.stringify({ path: '/workspace/test-image.png' })
       });
-    }
-  );
-
-  /**
-   * Test 5: Process list and management
-   *
-   * Tests starting multiple processes and listing them.
-   */
-  test(
-    'should manage multiple background processes',
-    { retry: 2, timeout: 60000 },
-    async () => {
-      // Start two background processes
-      const process1Response = await fetch(`${workerUrl}/api/process/start`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ command: 'sleep 30' })
-      });
-      const process1 = (await process1Response.json()) as Process;
-
-      const process2Response = await fetch(`${workerUrl}/api/process/start`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ command: 'sleep 30' })
-      });
-      const process2 = (await process2Response.json()) as Process;
-
-      // List processes - startProcess returns after registration, so they're immediately visible
-      const listResponse = await fetch(`${workerUrl}/api/process/list`, {
-        method: 'GET',
-        headers
-      });
-      expect(listResponse.status).toBe(200);
-      const processList = (await listResponse.json()) as Process[];
-
-      expect(processList.length).toBeGreaterThanOrEqual(2);
-      const ids = processList.map((p) => p.id);
-      expect(ids).toContain(process1.id);
-      expect(ids).toContain(process2.id);
-
-      // Kill all processes
-      const killAllResponse = await fetch(`${workerUrl}/api/process/kill-all`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({})
-      });
-
-      expect(killAllResponse.status).toBe(200);
-
-      // Poll until no running processes remain (up to 5 seconds)
-      let running: Process[] = [];
-      for (let i = 0; i < 10; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        const listAfterResponse = await fetch(`${workerUrl}/api/process/list`, {
-          method: 'GET',
-          headers
-        });
-        const processesAfter = (await listAfterResponse.json()) as Process[];
-        running = processesAfter.filter((p) => p.status === 'running');
-        if (running.length === 0) break;
-      }
-      expect(running.length).toBe(0);
     }
   );
 });

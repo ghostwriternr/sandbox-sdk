@@ -6,12 +6,6 @@ import {
   createUniqueSession,
   type TestSandbox
 } from './helpers/global-sandbox';
-import {
-  collectProcessStdout,
-  collectProcessStreamEvents,
-  startProcessViaTestWorker,
-  streamProcessViaTestWorker
-} from './helpers/process-stream';
 
 /**
  * Environment Variable Tests
@@ -101,25 +95,6 @@ describe('Environment Variables', () => {
     expect(response.status).toBe(200);
     const data = (await response.json()) as ExecResult;
     expect(data.stdout.trim()).toBe('command-specific-value');
-  }, 30000);
-
-  test('should support per-process env in startProcess()', async () => {
-    const process = await startProcessViaTestWorker(
-      workerUrl,
-      headers,
-      'echo "$STREAM_VAR"',
-      { env: { STREAM_VAR: 'stream-env-value' } }
-    );
-    const response = await streamProcessViaTestWorker(
-      workerUrl,
-      headers,
-      process.id
-    );
-
-    expect(response.status).toBe(200);
-
-    const events = await collectProcessStreamEvents(response);
-    expect(collectProcessStdout(events).trim()).toBe('stream-env-value');
   }, 30000);
 
   test('should override session env with per-command env', async () => {

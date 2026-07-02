@@ -1,4 +1,4 @@
-import type { PortExposeResult, Process } from '@repo/shared';
+import type { PortExposeResult } from '@repo/shared';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import WebSocket from 'ws';
 import {
@@ -99,29 +99,18 @@ async function startPreviewServer(
 ): Promise<void> {
   await writePreviewServer(workerUrl, headers, port);
 
-  const startResponse = await fetch(`${workerUrl}/api/process/start`, {
+  const startResponse = await fetch(`${workerUrl}/api/exec-and-wait-for-port`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
-      command: `bun run /workspace/preview-lifecycle-server-${port}.ts`
+      command: `bun run /workspace/preview-lifecycle-server-${port}.ts`,
+      port
     })
   });
-  await assertOK(startResponse, `Starting preview server for port ${port}`);
-  const process = (await startResponse.json()) as Pick<Process, 'id'>;
-
-  const waitPortResponse = await fetch(
-    `${workerUrl}/api/process/${process.id}/waitForPort`,
-    {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        port,
-        timeout: 15000,
-        mode: 'tcp'
-      })
-    }
+  await assertOK(
+    startResponse,
+    `Starting preview server and waiting for port ${port}`
   );
-  await assertOK(waitPortResponse, `Waiting for preview server port ${port}`);
 }
 
 async function exposePreviewPort(

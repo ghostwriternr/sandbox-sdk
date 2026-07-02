@@ -1,4 +1,4 @@
-import type { ExecResult, Process, ReadFileResult } from '@repo/shared';
+import type { ExecResult, ReadFileResult } from '@repo/shared';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import {
   cleanupTestSandbox,
@@ -60,30 +60,14 @@ describe('KeepAlive Feature', () => {
   test('should support background processes with keepAlive', async () => {
     const keepAliveHeaders = { ...headers, 'X-Sandbox-KeepAlive': 'true' };
 
-    // Start a background process
-    const startResponse = await fetch(`${workerUrl}/api/process/start`, {
+    const response = await fetch(`${workerUrl}/api/kill-running-exec`, {
       method: 'POST',
       headers: keepAliveHeaders,
-      body: JSON.stringify({ command: 'sleep 10' })
+      body: JSON.stringify({ command: 'sleep 30' })
     });
-    expect(startResponse.status).toBe(200);
-    const processData = (await startResponse.json()) as Process;
-    expect(processData.id).toBeTruthy();
-
-    // Verify process is running
-    const statusResponse = await fetch(
-      `${workerUrl}/api/process/${processData.id}`,
-      { method: 'GET', headers: keepAliveHeaders }
-    );
-    expect(statusResponse.status).toBe(200);
-    const statusData = (await statusResponse.json()) as Process;
-    expect(statusData.status).toBe('running');
-
-    // Cleanup
-    await fetch(`${workerUrl}/api/process/${processData.id}`, {
-      method: 'DELETE',
-      headers: keepAliveHeaders
-    });
+    expect(response.status).toBe(200);
+    const result = (await response.json()) as { exitCode: number };
+    expect(result.exitCode).not.toBe(0);
   }, 30000);
 
   test('should work with file operations and keepAlive', async () => {

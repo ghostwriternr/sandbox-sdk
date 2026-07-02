@@ -1,4 +1,3 @@
-import type { Process } from '@repo/shared';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { fetchWithRetry } from './helpers/fetch-with-retry';
 import {
@@ -78,29 +77,18 @@ console.log("Server listening on port " + server.port);
     });
     expect(writeResponse.status).toBe(200);
 
-    const startResponse = await fetch(`${workerUrl}/api/process/start`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        command: 'bun run /workspace/quick-tunnel-server.ts'
-      })
-    });
-    expect(startResponse.status).toBe(200);
-    const { id: processId } = (await startResponse.json()) as Process;
-
-    const waitPortResponse = await fetch(
-      `${workerUrl}/api/process/${processId}/waitForPort`,
+    const startResponse = await fetch(
+      `${workerUrl}/api/exec-and-wait-for-port`,
       {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          port: TUNNEL_TEST_PORT,
-          timeout: 15_000,
-          mode: 'tcp'
+          command: 'bun run /workspace/quick-tunnel-server.ts',
+          port: TUNNEL_TEST_PORT
         })
       }
     );
-    expect(waitPortResponse.status).toBe(200);
+    expect(startResponse.status).toBe(200);
 
     // 2. Create the quick tunnel.
     const tunnel = await getTunnel(TUNNEL_TEST_PORT);
@@ -133,10 +121,6 @@ console.log("Server listening on port " + server.port);
     } finally {
       // 6. Clean up — the tunnel and the user process.
       await destroyTunnel(TUNNEL_TEST_PORT);
-      await fetch(`${workerUrl}/api/process/${processId}/kill`, {
-        method: 'POST',
-        headers
-      }).catch(() => {});
     }
 
     // 7. After destroy, the tunnel is no longer in list().
@@ -156,17 +140,15 @@ console.log("Server listening on port " + server.port);
         content: `Bun.serve({ hostname: "0.0.0.0", port: ${port}, fetch() { return new Response("ok"); } });`
       })
     });
-    const startResponse = await fetch(`${workerUrl}/api/process/start`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ command: `bun run ${filePath}` })
-    });
-    const { id: processId } = (await startResponse.json()) as Process;
-    await fetch(`${workerUrl}/api/process/${processId}/waitForPort`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ port, timeout: 15_000, mode: 'tcp' })
-    });
+    const startResponse = await fetch(
+      `${workerUrl}/api/exec-and-wait-for-port`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ command: `bun run ${filePath}`, port })
+      }
+    );
+    expect(startResponse.status).toBe(200);
 
     try {
       const first = await getTunnel(port);
@@ -177,10 +159,6 @@ console.log("Server listening on port " + server.port);
       expect(second.port).toBe(port);
     } finally {
       await destroyTunnel(port).catch(() => {});
-      await fetch(`${workerUrl}/api/process/${processId}/kill`, {
-        method: 'POST',
-        headers
-      }).catch(() => {});
     }
   }, 180_000);
 
@@ -196,17 +174,15 @@ console.log("Server listening on port " + server.port);
         content: `Bun.serve({ hostname: "0.0.0.0", port: ${port}, fetch() { return new Response("ok"); } });`
       })
     });
-    const startResponse = await fetch(`${workerUrl}/api/process/start`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ command: `bun run ${filePath}` })
-    });
-    const { id: processId } = (await startResponse.json()) as Process;
-    await fetch(`${workerUrl}/api/process/${processId}/waitForPort`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ port, timeout: 15_000, mode: 'tcp' })
-    });
+    const startResponse = await fetch(
+      `${workerUrl}/api/exec-and-wait-for-port`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ command: `bun run ${filePath}`, port })
+      }
+    );
+    expect(startResponse.status).toBe(200);
 
     try {
       const tunnel = await getTunnel(port);
@@ -247,10 +223,6 @@ console.log("Server listening on port " + server.port);
       expect(fresh.url).not.toBe(tunnel.url);
     } finally {
       await destroyTunnel(port).catch(() => {});
-      await fetch(`${workerUrl}/api/process/${processId}/kill`, {
-        method: 'POST',
-        headers
-      }).catch(() => {});
     }
   }, 180_000);
 
@@ -274,22 +246,16 @@ Bun.serve({
         headers,
         body: JSON.stringify({ path: filePath, content: code })
       });
-      const start = await fetch(`${workerUrl}/api/process/start`, {
+      const start = await fetch(`${workerUrl}/api/exec-and-wait-for-port`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ command: `bun run ${filePath}` })
+        body: JSON.stringify({ command: `bun run ${filePath}`, port })
       });
-      const { id: processId } = (await start.json()) as Process;
-      await fetch(`${workerUrl}/api/process/${processId}/waitForPort`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ port, timeout: 15_000, mode: 'tcp' })
-      });
-      return processId;
+      expect(start.status).toBe(200);
     };
 
-    const processA = await startServer(portA, markerA);
-    const processB = await startServer(portB, markerB);
+    await startServer(portA, markerA);
+    await startServer(portB, markerB);
     const tunnelA = await getTunnel(portA);
     const tunnelB = await getTunnel(portB);
 
@@ -313,16 +279,6 @@ Bun.serve({
       expect(bodyB).toBe(markerB);
     } finally {
       await Promise.all([destroyTunnel(portA), destroyTunnel(portB)]);
-      await Promise.all([
-        fetch(`${workerUrl}/api/process/${processA}/kill`, {
-          method: 'POST',
-          headers
-        }).catch(() => {}),
-        fetch(`${workerUrl}/api/process/${processB}/kill`, {
-          method: 'POST',
-          headers
-        }).catch(() => {})
-      ]);
     }
   }, 240_000);
 

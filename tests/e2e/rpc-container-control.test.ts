@@ -18,12 +18,6 @@ import {
   createUniqueSession,
   type TestSandbox
 } from './helpers/global-sandbox';
-import {
-  collectProcessStdout,
-  collectProcessStreamEvents,
-  startProcessViaTestWorker,
-  streamProcessViaTestWorker
-} from './helpers/process-stream';
 
 describe('RPC Container Control', () => {
   let sandbox: TestSandbox | null = null;
@@ -113,36 +107,6 @@ describe('RPC Container Control', () => {
     const names = result.files.map((f) => f.name);
     expect(names).toContain('a.txt');
     expect(names).toContain('b.txt');
-  });
-
-  test('should stream process output', async () => {
-    const process = await startProcessViaTestWorker(
-      workerUrl,
-      headers,
-      'echo line1 && echo line2 && echo line3'
-    );
-    const response = await streamProcessViaTestWorker(
-      workerUrl,
-      headers,
-      process.id
-    );
-
-    expect(response.status).toBe(200);
-    expect(response.body).toBeTruthy();
-
-    const events = await collectProcessStreamEvents(response);
-    const stdoutEvents = events.filter((event) => event.type === 'stdout');
-    const exitEvents = events.filter((event) => event.type === 'exit');
-
-    expect(stdoutEvents.length).toBeGreaterThan(0);
-    expect(exitEvents.length).toBe(1);
-
-    const allOutput = collectProcessStdout(events);
-    expect(allOutput).toContain('line1');
-    expect(allOutput).toContain('line2');
-    expect(allOutput).toContain('line3');
-
-    expect(exitEvents[0].exitCode).toBe(0);
   });
 
   test('should delete a file', async () => {

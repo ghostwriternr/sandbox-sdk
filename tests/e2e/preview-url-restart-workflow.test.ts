@@ -1,4 +1,4 @@
-import type { PortExposeResult, Process } from '@repo/shared';
+import type { PortExposeResult } from '@repo/shared';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { stopContainerAndWait } from './helpers/container-lifecycle';
 import {
@@ -83,29 +83,21 @@ await Bun.sleep(300000);
         });
         await assertOK(writeResponse, 'Writing restart preview server');
 
-        const startResponse = await fetch(`${workerUrl}/api/process/start`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            command: `bun run /workspace/restart-server.ts`
-          })
-        });
-        await assertOK(startResponse, 'Starting restart preview server');
-        const { id: processId } = (await startResponse.json()) as Process;
-
-        const waitPortResponse = await fetch(
-          `${workerUrl}/api/process/${processId}/waitForPort`,
+        const startResponse = await fetch(
+          `${workerUrl}/api/exec-and-wait-for-port`,
           {
             method: 'POST',
             headers,
             body: JSON.stringify({
-              port: RESTART_TEST_PORT,
-              timeout: 15000,
-              mode: 'tcp'
+              command: `bun run /workspace/restart-server.ts`,
+              port: RESTART_TEST_PORT
             })
           }
         );
-        await assertOK(waitPortResponse, 'Waiting for restart preview port');
+        await assertOK(
+          startResponse,
+          'Starting restart preview server and waiting for port'
+        );
       };
 
       try {
