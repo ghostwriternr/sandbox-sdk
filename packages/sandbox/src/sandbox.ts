@@ -20,25 +20,20 @@ import type {
   ISandbox,
   ListFilesOptions,
   LocalMountBucketOptions,
-  LogEvent,
   MountBucketOptions,
   PortWatchEvent,
-  Process,
-  ProcessOptions,
-  ProcessQueryOptions,
-  ProcessStatus,
   R2BindingMountBucketOptions,
   ReadFileResult,
   ReadFileStreamResult,
   RemoteMountBucketOptions,
   RestoreBackupResult,
+  SandboxCommand,
   SandboxOptions,
+  SandboxProcess,
   SandboxTerminal,
   SessionOptions,
   TerminalCreateOptions,
   TerminalOptions,
-  WaitForExitResult,
-  WaitForLogResult,
   WaitForPortOptions,
   WatchOptions
 } from '@repo/shared';
@@ -78,6 +73,18 @@ import {
   ProcessReadyTimeoutError,
   SandboxError
 } from './errors';
+import {
+  commandToLogString,
+  normalizeSandboxCommand
+} from './execution/command';
+import {
+  getNativeContainerExec,
+  type NativeContainerExecOptions,
+  type NativeExecProcess,
+  normalizeNativeEnv
+} from './execution/native-container';
+import { createSandboxProcess } from './execution/sandbox-process';
+import { stringToReadableStream } from './execution/stream-utils';
 import { SandboxExtension } from './extensions';
 import { collectFile, streamFile } from './file-stream';
 import { LocalMountSyncManager } from './local-mount-sync';
@@ -681,18 +688,8 @@ export function getSandbox<T extends Sandbox<any>>(
 
   const enhancedMethods = {
     fetch: (request: Request) => stub.fetch(request),
-    exec: (command: string, execOptions?: ExecOptions) =>
+    exec: (command: SandboxCommand, execOptions?: ExecOptions) =>
       stub.exec(command, execOptions),
-    startProcess: (command: string, processOptions?: ProcessOptions) =>
-      stub.startProcess(command, processOptions),
-    listProcesses: (options?: ProcessQueryOptions) =>
-      options?.sessionId === undefined
-        ? stub.listProcesses()
-        : stub.listProcesses({ sessionId: options.sessionId }),
-    getProcess: (id: string, options?: ProcessQueryOptions) =>
-      options?.sessionId === undefined
-        ? stub.getProcess(id)
-        : stub.getProcess(id, { sessionId: options.sessionId }),
 
     writeFile: (
       path: string,
@@ -2859,6 +2856,36 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     return await super.containerFetch(requestOrUrl, portOrInit, portParam);
   }
 
+  private async ensureContainerRunning(signal?: AbortSignal): Promise<void> {
+    const state = await this.getState();
+    if (state.status === 'healthy' && this.ctx.container?.running === true) {
+      return;
+    }
+
+    await this.start({
+      envVars: this.envVars,
+      entrypoint: this.entrypoint,
+      enableInternet: this.enableInternet,
+      labels: this.labels
+    });
+
+    if (signal?.aborted) {
+      throw new Error('Operation was aborted');
+    }
+  }
+
+  private async ensureControlPlaneReady(signal?: AbortSignal): Promise<void> {
+    await this.startAndWaitForPorts({
+      ports: this.defaultPort,
+      cancellationOptions: {
+        instanceGetTimeoutMS: this.containerTimeouts.instanceGetTimeoutMS,
+        portReadyTimeoutMS: this.containerTimeouts.portReadyTimeoutMS,
+        waitInterval: this.containerTimeouts.waitIntervalMS,
+        abort: signal
+      }
+    });
+  }
+
   /**
    * Helper: Check if error is "no container instance available"
    * This indicates the container VM is still being provisioned.
@@ -3369,8 +3396,192 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
     };
   }
 
-  async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
-    return this.executeCommand(command, undefined, options);
+  async exec(
+    command: SandboxCommand,
+    options: ExecOptions = {}
+  ): Promise<SandboxProcess> {
+    const startTime = Date.now();
+    const commandText = commandToLogString(command);
+    let exitCode: number | undefined;
+    let execError: Error | undefined;
+
+    try {
+      await this.ensureContainerRunning();
+
+      const nativeContainer = getNativeContainerExec(this.ctx.container);
+      const nativeOptions = this.buildNativeExecOptions(options);
+      const nativeProcess = await nativeContainer.exec(
+        normalizeSandboxCommand(command),
+        nativeOptions
+      );
+
+      nativeProcess.exitCode
+        .then((code) => {
+          exitCode = code;
+        })
+        .catch(() => {});
+
+      return createSandboxProcess({
+        pid: nativeProcess.pid,
+        stdin: nativeProcess.stdin,
+        stdout: nativeProcess.stdout,
+        stderr: nativeProcess.stderr,
+        exitCode: this.withExecTimeout(nativeProcess, options.timeout),
+        output: () => nativeProcess.output(),
+        kill: (signal) => nativeProcess.kill(signal),
+        waitForPort: (port, waitOptions, processExitCode) =>
+          this.waitForPortForProcess(port, waitOptions, processExitCode)
+      });
+    } catch (error) {
+      execError = error instanceof Error ? error : new Error(String(error));
+      throw error;
+    } finally {
+      logCanonicalEvent(this.logger, {
+        event: 'sandbox.exec',
+        outcome: execError ? 'error' : 'success',
+        command: commandText,
+        exitCode,
+        durationMs: Date.now() - startTime,
+        sessionId: undefined,
+        origin: options.origin ?? 'user',
+        error: execError,
+        errorMessage: execError?.message
+      });
+    }
+  }
+
+  private buildNativeExecOptions(
+    options: ExecOptions
+  ): NativeContainerExecOptions {
+    return {
+      stdin:
+        typeof options.stdin === 'string'
+          ? stringToReadableStream(options.stdin)
+          : options.stdin,
+      stdout: options.stdout ?? 'pipe',
+      stderr: options.stderr ?? 'pipe',
+      cwd: options.cwd,
+      env: normalizeNativeEnv(this.resolveExecutionEnv(undefined, options.env)),
+      user: options.user
+    };
+  }
+
+  private withExecTimeout(
+    process: NativeExecProcess,
+    timeoutMs?: number
+  ): Promise<number> {
+    if (timeoutMs === undefined) return process.exitCode;
+
+    return Promise.race([
+      process.exitCode,
+      new Promise<number>((resolve) => {
+        setTimeout(() => {
+          process.kill(15);
+          resolve(124);
+        }, timeoutMs);
+      })
+    ]);
+  }
+
+  private async waitForPortForProcess(
+    port: number,
+    options: WaitForPortOptions | undefined,
+    processExitCode: Promise<number>
+  ): Promise<void> {
+    const timeout = options?.timeout;
+    const interval = options?.interval;
+    const mode = options?.mode ?? 'http';
+    const status = options?.status;
+    const statusMin = typeof status === 'object' ? status.min : status;
+    const statusMax = typeof status === 'object' ? status.max : status;
+
+    const stream = await this.client.ports.watchPort({
+      port,
+      mode,
+      path: options?.path,
+      statusMin,
+      statusMax,
+      interval
+    });
+
+    const ready = this.consumePortWatchStream(stream);
+    const exited = processExitCode.then((code) => {
+      throw new ProcessExitedBeforeReadyError({
+        code: ErrorCode.PROCESS_EXITED_BEFORE_READY,
+        message: `Process exited with code ${code} before becoming ready. Waiting for: port ${port}`,
+        context: {
+          processId: 'native-exec',
+          command: 'exec',
+          condition: `port ${port}`,
+          exitCode: code
+        },
+        httpStatus: 500,
+        timestamp: new Date().toISOString()
+      });
+    });
+
+    if (timeout === undefined) {
+      await Promise.race([ready, exited]);
+      return;
+    }
+
+    await Promise.race([
+      ready,
+      exited,
+      new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(
+            new ProcessReadyTimeoutError({
+              code: ErrorCode.PROCESS_READY_TIMEOUT,
+              message: `Process did not become ready within ${timeout}ms. Waiting for: port ${port}`,
+              context: {
+                processId: 'native-exec',
+                command: 'exec',
+                condition: `port ${port}`,
+                timeout
+              },
+              httpStatus: 408,
+              timestamp: new Date().toISOString()
+            })
+          );
+        }, timeout);
+      })
+    ]);
+  }
+
+  private async consumePortWatchStream(
+    stream: ReadableStream<Uint8Array>
+  ): Promise<void> {
+    try {
+      for await (const event of parseSSEStream<PortWatchEvent>(stream)) {
+        switch (event.type) {
+          case 'ready':
+            return;
+          case 'process_exited':
+            throw new ProcessExitedBeforeReadyError({
+              code: ErrorCode.PROCESS_EXITED_BEFORE_READY,
+              message: `Process exited with code ${event.exitCode ?? 1} before becoming ready.`,
+              context: {
+                processId: 'native-exec',
+                command: 'exec',
+                condition: 'port ready',
+                exitCode: event.exitCode ?? 1
+              },
+              httpStatus: 500,
+              timestamp: new Date().toISOString()
+            });
+          case 'error':
+            throw new Error(event.error || 'Port watch failed');
+        }
+      }
+      throw new Error('Port watch stream ended unexpectedly');
+    } finally {
+      try {
+        await stream.cancel();
+      } catch {
+        // Stream may already be closed
+      }
+    }
   }
 
   /**
@@ -3459,669 +3670,6 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
    * Centralizes process object creation with bound methods
    * This eliminates duplication across startProcess, listProcesses, getProcess, and session wrappers
    */
-  private createProcessFromDTO(
-    data: {
-      id: string;
-      pid?: number;
-      command: string;
-      status: ProcessStatus;
-      startTime: string | Date;
-      endTime?: string | Date;
-      exitCode?: number;
-    },
-    sessionId?: string
-  ): Process {
-    return {
-      id: data.id,
-      pid: data.pid,
-      command: data.command,
-      status: data.status,
-      startTime:
-        typeof data.startTime === 'string'
-          ? new Date(data.startTime)
-          : data.startTime,
-      endTime: data.endTime
-        ? typeof data.endTime === 'string'
-          ? new Date(data.endTime)
-          : data.endTime
-        : undefined,
-      exitCode: data.exitCode,
-      sessionId,
-
-      kill: async () => {
-        await this.killProcess(data.id);
-      },
-
-      getStatus: async () => {
-        const current = await this.getProcess(data.id);
-        return current?.status || 'error';
-      },
-
-      getLogs: async () => {
-        const logs = await this.getProcessLogs(data.id);
-        return { stdout: logs.stdout, stderr: logs.stderr };
-      },
-
-      waitForLog: async (
-        pattern: string | RegExp,
-        timeout?: number
-      ): Promise<WaitForLogResult> => {
-        return this.waitForLogPattern(data.id, data.command, pattern, timeout);
-      },
-
-      waitForPort: async (
-        port: number,
-        options?: WaitForPortOptions
-      ): Promise<void> => {
-        await this.waitForPortReady(data.id, data.command, port, options);
-      },
-
-      waitForExit: async (timeout?: number): Promise<WaitForExitResult> => {
-        return this.waitForProcessExit(data.id, data.command, timeout);
-      }
-    };
-  }
-
-  /**
-   * Wait for a log pattern to appear in process output
-   */
-  private async waitForLogPattern(
-    processId: string,
-    command: string,
-    pattern: string | RegExp,
-    timeout?: number
-  ): Promise<WaitForLogResult> {
-    const startTime = Date.now();
-    const conditionStr = this.conditionToString(pattern);
-    let collectedStdout = '';
-    let collectedStderr = '';
-
-    // First check existing logs
-    try {
-      const existingLogs = await this.getProcessLogs(processId);
-      // Ensure existing logs end with newline for proper line separation from streamed output
-      collectedStdout = existingLogs.stdout;
-      if (collectedStdout && !collectedStdout.endsWith('\n')) {
-        collectedStdout += '\n';
-      }
-      collectedStderr = existingLogs.stderr;
-      if (collectedStderr && !collectedStderr.endsWith('\n')) {
-        collectedStderr += '\n';
-      }
-
-      // Check stdout
-      const stdoutResult = this.matchPattern(existingLogs.stdout, pattern);
-      if (stdoutResult) {
-        return stdoutResult;
-      }
-
-      // Check stderr
-      const stderrResult = this.matchPattern(existingLogs.stderr, pattern);
-      if (stderrResult) {
-        return stderrResult;
-      }
-    } catch (error) {
-      // Process might have already exited, continue to streaming
-      this.logger.debug('Could not get existing logs, will stream', {
-        processId,
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
-
-    // Stream new logs and check for pattern
-    const stream = await this.streamProcessLogs(processId);
-
-    // Set up timeout if specified
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    let timeoutPromise: Promise<never> | undefined;
-
-    if (timeout !== undefined) {
-      const remainingTime = timeout - (Date.now() - startTime);
-      if (remainingTime <= 0) {
-        throw this.createReadyTimeoutError(
-          processId,
-          command,
-          conditionStr,
-          timeout
-        );
-      }
-
-      timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(
-            this.createReadyTimeoutError(
-              processId,
-              command,
-              conditionStr,
-              timeout
-            )
-          );
-        }, remainingTime);
-      });
-    }
-
-    try {
-      // Process stream
-      const streamProcessor = async (): Promise<WaitForLogResult> => {
-        const checkPattern = (): WaitForLogResult | null => {
-          const stdoutResult = this.matchPattern(collectedStdout, pattern);
-          if (stdoutResult) return stdoutResult;
-          const stderrResult = this.matchPattern(collectedStderr, pattern);
-          if (stderrResult) return stderrResult;
-          return null;
-        };
-
-        for await (const event of parseSSEStream<LogEvent>(stream)) {
-          if (event.type === 'stdout' || event.type === 'stderr') {
-            const data = event.data || '';
-
-            if (event.type === 'stdout') {
-              collectedStdout += data;
-            } else {
-              collectedStderr += data;
-            }
-
-            const result = checkPattern();
-            if (result) return result;
-          }
-
-          // Process exited - do final check before throwing
-          if (event.type === 'exit') {
-            // Final check in case pattern arrived in last chunk
-            const result = checkPattern();
-            if (result) return result;
-            throw this.createExitedBeforeReadyError(
-              processId,
-              command,
-              conditionStr,
-              event.exitCode ?? 1
-            );
-          }
-        }
-
-        // Stream ended without exit event — do final check
-        const finalResult = checkPattern();
-        if (finalResult) return finalResult;
-        // Stream ended without finding pattern - this indicates process exited
-        throw this.createExitedBeforeReadyError(
-          processId,
-          command,
-          conditionStr,
-          0
-        );
-      };
-
-      // Race with timeout if specified, otherwise just run stream processor
-      if (timeoutPromise) {
-        return await Promise.race([streamProcessor(), timeoutPromise]);
-      }
-      return await streamProcessor();
-    } finally {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
-    }
-  }
-
-  /**
-   * Wait for a port to become available (for process readiness checking)
-   */
-  private async waitForPortReady(
-    processId: string,
-    command: string,
-    port: number,
-    options?: WaitForPortOptions
-  ): Promise<void> {
-    const {
-      mode = 'http',
-      path = '/',
-      status = { min: 200, max: 399 },
-      timeout,
-      interval = 500
-    } = options ?? {};
-
-    const conditionStr =
-      mode === 'http' ? `port ${port} (HTTP ${path})` : `port ${port} (TCP)`;
-
-    // Normalize status to min/max
-    const statusMin = typeof status === 'number' ? status : status.min;
-    const statusMax = typeof status === 'number' ? status : status.max;
-
-    // Open streaming watch - container handles internal polling
-    const stream = await this.client.ports.watchPort({
-      port,
-      mode,
-      path,
-      statusMin,
-      statusMax,
-      processId,
-      interval
-    });
-
-    // Set up timeout if specified
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    let timeoutPromise: Promise<never> | undefined;
-
-    if (timeout !== undefined) {
-      timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(
-            this.createReadyTimeoutError(
-              processId,
-              command,
-              conditionStr,
-              timeout
-            )
-          );
-        }, timeout);
-      });
-    }
-
-    try {
-      const streamProcessor = async (): Promise<void> => {
-        for await (const event of parseSSEStream<PortWatchEvent>(stream)) {
-          switch (event.type) {
-            case 'ready':
-              return; // Success!
-            case 'process_exited':
-              throw this.createExitedBeforeReadyError(
-                processId,
-                command,
-                conditionStr,
-                event.exitCode ?? 1
-              );
-            case 'error':
-              throw new Error(event.error || 'Port watch failed');
-            // 'watching' - continue
-          }
-        }
-        throw new Error('Port watch stream ended unexpectedly');
-      };
-
-      if (timeoutPromise) {
-        await Promise.race([streamProcessor(), timeoutPromise]);
-      } else {
-        await streamProcessor();
-      }
-    } finally {
-      if (timeoutId) clearTimeout(timeoutId);
-      // Cancel the stream to stop container-side polling
-      try {
-        await stream.cancel();
-      } catch {
-        // Stream may already be closed
-      }
-    }
-  }
-
-  /**
-   * Wait for a process to exit
-   * Returns the exit code
-   */
-  private async waitForProcessExit(
-    processId: string,
-    command: string,
-    timeout?: number
-  ): Promise<WaitForExitResult> {
-    const stream = await this.streamProcessLogs(processId);
-
-    // Set up timeout if specified
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    let timeoutPromise: Promise<never> | undefined;
-
-    if (timeout !== undefined) {
-      timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(
-            this.createReadyTimeoutError(
-              processId,
-              command,
-              'process exit',
-              timeout
-            )
-          );
-        }, timeout);
-      });
-    }
-
-    try {
-      const streamProcessor = async (): Promise<WaitForExitResult> => {
-        for await (const event of parseSSEStream<LogEvent>(stream)) {
-          if (event.type === 'exit') {
-            return {
-              exitCode: event.exitCode ?? 1
-            };
-          }
-        }
-
-        // Stream ended without exit event - shouldn't happen, but handle gracefully
-        throw new Error(
-          `Process ${processId} stream ended unexpectedly without exit event`
-        );
-      };
-
-      if (timeoutPromise) {
-        return await Promise.race([streamProcessor(), timeoutPromise]);
-      }
-      return await streamProcessor();
-    } finally {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
-    }
-  }
-
-  /**
-   * Match a pattern against text
-   */
-  private matchPattern(
-    text: string,
-    pattern: string | RegExp
-  ): WaitForLogResult | null {
-    if (typeof pattern === 'string') {
-      // Simple substring match
-      if (text.includes(pattern)) {
-        // Find the line containing the pattern
-        const lines = text.split('\n');
-        for (const line of lines) {
-          if (line.includes(pattern)) {
-            return { line };
-          }
-        }
-        return { line: pattern };
-      }
-    } else {
-      const safePattern = new RegExp(
-        pattern.source,
-        pattern.flags.replace('g', '')
-      );
-      const match = text.match(safePattern);
-      if (match) {
-        // Find the full line containing the match
-        const lines = text.split('\n');
-        for (const line of lines) {
-          const lineMatch = line.match(safePattern);
-          if (lineMatch) {
-            return { line, match: lineMatch };
-          }
-        }
-        return { line: match[0], match };
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Convert a log pattern to a human-readable string
-   */
-  private conditionToString(pattern: string | RegExp): string {
-    if (typeof pattern === 'string') {
-      return `"${pattern}"`;
-    }
-    return pattern.toString();
-  }
-
-  /**
-   * Create a ProcessReadyTimeoutError
-   */
-  private createReadyTimeoutError(
-    processId: string,
-    command: string,
-    condition: string,
-    timeout: number
-  ): ProcessReadyTimeoutError {
-    return new ProcessReadyTimeoutError({
-      code: ErrorCode.PROCESS_READY_TIMEOUT,
-      message: `Process did not become ready within ${timeout}ms. Waiting for: ${condition}`,
-      context: {
-        processId,
-        command,
-        condition,
-        timeout
-      },
-      httpStatus: 408,
-      timestamp: new Date().toISOString(),
-      suggestion: `Check if your process outputs ${condition}. You can increase the timeout parameter.`
-    });
-  }
-
-  /**
-   * Create a ProcessExitedBeforeReadyError
-   */
-  private createExitedBeforeReadyError(
-    processId: string,
-    command: string,
-    condition: string,
-    exitCode: number
-  ): ProcessExitedBeforeReadyError {
-    return new ProcessExitedBeforeReadyError({
-      code: ErrorCode.PROCESS_EXITED_BEFORE_READY,
-      message: `Process exited with code ${exitCode} before becoming ready. Waiting for: ${condition}`,
-      context: {
-        processId,
-        command,
-        condition,
-        exitCode
-      },
-      httpStatus: 500,
-      timestamp: new Date().toISOString(),
-      suggestion: 'Check process logs with getLogs() for error messages'
-    });
-  }
-
-  // Background process management
-  async startProcess(
-    command: string,
-    options?: ProcessOptions
-  ): Promise<Process> {
-    // Use the new HttpClient method to start the process
-    try {
-      const session = this.validateOptionalSessionId(options?.sessionId);
-      const executionOptions = this.buildExecutionRequestOptions(session, {
-        timeout: options?.timeout,
-        env: options?.env,
-        cwd: options?.cwd
-      });
-      const requestOptions = {
-        ...executionOptions,
-        ...(session !== undefined && { sessionId: session }),
-        ...(options?.processId !== undefined && {
-          processId: options.processId
-        }),
-        ...(options?.encoding !== undefined && { encoding: options.encoding }),
-        ...(options?.autoCleanup !== undefined && {
-          autoCleanup: options.autoCleanup
-        })
-      };
-
-      const response = await this.client.processes.startProcess(
-        command,
-        requestOptions
-      );
-
-      const processObj = this.createProcessFromDTO(
-        {
-          id: response.processId,
-          pid: response.pid,
-          command: response.command,
-          status: 'running' as ProcessStatus,
-          startTime: new Date(),
-          endTime: undefined,
-          exitCode: undefined
-        },
-        session
-      );
-
-      // Call onStart callback if provided
-      if (options?.onStart) {
-        options.onStart(processObj);
-      }
-
-      // Start background streaming if output/exit callbacks are provided
-      if (options?.onOutput || options?.onExit) {
-        // Fire and forget - don't await, let it run in background
-        this.startProcessCallbackStream(response.processId, options).catch(
-          () => {
-            // Error already handled in startProcessCallbackStream
-          }
-        );
-      }
-
-      return processObj;
-    } catch (error) {
-      if (options?.onError && error instanceof Error) {
-        options.onError(error);
-      }
-
-      throw error;
-    }
-  }
-
-  /**
-   * Start background streaming for process callbacks
-   * Opens SSE stream to container and routes events to callbacks
-   */
-  private async startProcessCallbackStream(
-    processId: string,
-    options: ProcessOptions
-  ): Promise<void> {
-    try {
-      const stream = await this.client.processes.streamProcessLogs(processId);
-
-      for await (const event of parseSSEStream<{
-        type: string;
-        data?: string;
-        exitCode?: number;
-        processId?: string;
-      }>(stream)) {
-        switch (event.type) {
-          case 'stdout':
-            if (event.data && options.onOutput) {
-              options.onOutput('stdout', event.data);
-            }
-            break;
-          case 'stderr':
-            if (event.data && options.onOutput) {
-              options.onOutput('stderr', event.data);
-            }
-            break;
-          case 'exit':
-          case 'complete':
-            if (options.onExit) {
-              options.onExit(event.exitCode ?? null);
-            }
-            return; // Stream complete
-        }
-      }
-
-      // If we get here without a complete event, something went wrong
-      throw new Error('Stream ended without completion event');
-    } catch (error) {
-      // Call onError if streaming fails
-      if (options.onError && error instanceof Error) {
-        options.onError(error);
-      }
-      // Don't rethrow - background streaming failure shouldn't crash the caller
-      this.logger.error(
-        'Background process streaming failed',
-        error instanceof Error ? error : new Error(String(error)),
-        { processId }
-      );
-    }
-  }
-
-  async listProcesses(options?: ProcessQueryOptions): Promise<Process[]> {
-    const session = this.validateOptionalSessionId(options?.sessionId);
-    const response = await this.client.processes.listProcesses();
-
-    return response.processes.map((processData) =>
-      this.createProcessFromDTO(
-        {
-          id: processData.id,
-          pid: processData.pid,
-          command: processData.command,
-          status: processData.status,
-          startTime: processData.startTime,
-          endTime: processData.endTime,
-          exitCode: processData.exitCode
-        },
-        session
-      )
-    );
-  }
-
-  async getProcess(
-    id: string,
-    options?: ProcessQueryOptions
-  ): Promise<Process | null> {
-    const session = this.validateOptionalSessionId(options?.sessionId);
-    try {
-      const response = await this.client.processes.getProcess(id);
-
-      if (!response.process) {
-        return null;
-      }
-
-      const processData = response.process;
-      return this.createProcessFromDTO(
-        {
-          id: processData.id,
-          pid: processData.pid,
-          command: processData.command,
-          status: processData.status,
-          startTime: processData.startTime,
-          endTime: processData.endTime,
-          exitCode: processData.exitCode
-        },
-        session
-      );
-    } catch (error) {
-      if (error instanceof ProcessNotFoundError) {
-        return null;
-      }
-      throw error;
-    }
-  }
-
-  async killProcess(id: string): Promise<void> {
-    await this.client.processes.killProcess(id);
-  }
-
-  async killAllProcesses(): Promise<number> {
-    const response = await this.client.processes.killAllProcesses();
-    return response.cleanedCount;
-  }
-
-  async cleanupCompletedProcesses(): Promise<number> {
-    // Not yet implemented - requires container endpoint
-    return 0;
-  }
-
-  async getProcessLogs(
-    id: string
-  ): Promise<{ stdout: string; stderr: string; processId: string }> {
-    const response = await this.client.processes.getProcessLogs(id);
-    return {
-      stdout: response.stdout,
-      stderr: response.stderr,
-      processId: response.processId
-    };
-  }
-
-  /**
-   * Stream logs from a background process as a ReadableStream.
-   */
-  async streamProcessLogs(
-    processId: string,
-    options?: { signal?: AbortSignal }
-  ): Promise<ReadableStream<Uint8Array>> {
-    // Check for cancellation
-    if (options?.signal?.aborted) {
-      throw new Error('Operation was aborted');
-    }
-
-    return this.client.processes.streamProcessLogs(processId);
-  }
 
   async gitCheckout(
     repoUrl: string,
@@ -4954,19 +4502,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
       id: sessionId,
 
       exec: (command, options) =>
-        this.executeCommand(command, sessionId, options),
-
-      // Process management
-      startProcess: (command, options) =>
-        this.startProcess(command, { ...options, sessionId }),
-      listProcesses: () => this.listProcesses({ sessionId }),
-      getProcess: (id) => this.getProcess(id, { sessionId }),
-      killProcess: (id) => this.killProcess(id),
-      killAllProcesses: () => this.killAllProcesses(),
-      cleanupCompletedProcesses: () => this.cleanupCompletedProcesses(),
-      getProcessLogs: (id) => this.getProcessLogs(id),
-      streamProcessLogs: (processId, options) =>
-        this.streamProcessLogs(processId, options),
+        this.executeCommand(command as string, sessionId, options) as any,
 
       // File operations - pass sessionId via options
       writeFile: (path, content, options) =>
