@@ -491,12 +491,12 @@ export class CommandSession implements AsyncDisposable {
 
       if (pending.timeoutMs !== undefined) {
         processCompletion.timeout = setTimeout(() => {
-          void killFn();
+          void terminateProcessTree(pid, PROCESS_TIMEOUT_GRACE_MS);
         }, pending.timeoutMs);
       }
       if (pending.abortSignal) {
         processCompletion.abortListener = () => {
-          void killFn();
+          void terminateProcessTree(pid, PROCESS_TIMEOUT_GRACE_MS);
         };
         pending.abortSignal.addEventListener(
           'abort',
@@ -506,7 +506,7 @@ export class CommandSession implements AsyncDisposable {
       }
       this.processes.set(id, processCompletion);
       if (pending.abortSignal?.aborted) {
-        void killFn();
+        void terminateProcessTree(pid, PROCESS_TIMEOUT_GRACE_MS);
       }
       pending.resolve(process);
     }

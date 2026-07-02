@@ -153,15 +153,48 @@ describe('CommandSession', () => {
     );
   });
 
-  it('aborts a background process when its abort signal is triggered', async () => {
+  it('aborts a background process and reaps descendants when its abort signal is triggered', async () => {
     await using session = await CommandSession.create();
     const controller = new AbortController();
-    const process = await session.startProcess('sleep 10', {
-      signal: controller.signal
+    let childPid = 0;
+    const proc = await session.startProcess('sleep 100 & echo "PID:$!"; wait', {
+      signal: controller.signal,
+      onOutput: (chunk) => {
+        const match = chunk.data.match(/PID:(\d+)/);
+        if (match) {
+          childPid = Number.parseInt(match[1], 10);
+        }
+      }
     });
+
+    // Wait until the child PID is captured
+    for (let i = 0; i < 100 && childPid === 0; i++) {
+      await Bun.sleep(20);
+    }
+    expect(childPid).toBeGreaterThan(0);
+
+    // Verify descendant is alive
+    let aliveBefore = false;
+    try {
+      process.kill(childPid, 0);
+      aliveBefore = true;
+    } catch {}
+    expect(aliveBefore).toBe(true);
+
     controller.abort();
-    const res = await getProcessText(process);
+
+    const res = await getProcessText(proc);
     expect(res.exitCode).not.toBe(0);
+
+    // Verify descendant is reaped
+    let aliveAfter = true;
+    try {
+      process.kill(childPid, 0);
+      aliveAfter = true;
+    } catch {
+      aliveAfter = false;
+    }
+    expect(aliveAfter).toBe(false);
   });
 
   it('kills a background process and descendants on timeoutMs', async () => {
