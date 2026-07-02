@@ -57,6 +57,27 @@ async function startOpencodeServer(
   config?: Config,
   customEnv?: Record<string, string>
 ): Promise<SandboxProcess> {
+  // Check if port is already serving
+  const checkPort = await sandbox.exec(`nc -z 127.0.0.1 ${port}`);
+  const checkResult = await checkPort.output();
+  if (checkResult.exitCode === 0) {
+    getLogger().info('OpenCode server is already running', { port });
+    return {
+      stdin: null,
+      stdout: null,
+      stderr: null,
+      pid: -1,
+      exitCode: Promise.resolve(0),
+      output: async () => ({
+        stdout: new Uint8Array().buffer,
+        stderr: new Uint8Array().buffer,
+        exitCode: 0
+      }),
+      kill: async () => {},
+      waitForPort: async () => {}
+    };
+  }
+
   getLogger().info('Starting OpenCode server', { port, directory });
 
   // Pass config via OPENCODE_CONFIG_CONTENT and also extract API keys to env vars
@@ -122,6 +143,41 @@ async function startOpencodeServer(
     env: Object.keys(env).length > 0 ? env : undefined
   });
 
+  let stdoutStr = '';
+  let stderrStr = '';
+
+  const stdoutStream = process.stdout;
+  if (stdoutStream) {
+    (async () => {
+      try {
+        const reader = stdoutStream.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          stdoutStr += decoder.decode(value, { stream: true });
+          if (stdoutStr.length > 10000) stdoutStr = stdoutStr.slice(-10000);
+        }
+      } catch {}
+    })();
+  }
+
+  const stderrStream = process.stderr;
+  if (stderrStream) {
+    (async () => {
+      try {
+        const reader = stderrStream.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          stderrStr += decoder.decode(value, { stream: true });
+          if (stderrStr.length > 10000) stderrStr = stderrStr.slice(-10000);
+        }
+      } catch {}
+    })();
+  }
+
   // Wait for server to be ready - check the actual health endpoint
   try {
     await process.waitForPort(port, {
@@ -137,11 +193,14 @@ async function startOpencodeServer(
   } catch (e) {
     const error = e instanceof Error ? e : undefined;
     getLogger().error('OpenCode server failed to start', error, {
-      port
+      port,
+      stdout: stdoutStr,
+      stderr: stderrStr
     });
+    const diagnostics = stderrStr || stdoutStr || 'Unknown error';
     throw new OpencodeStartupError(
-      `OpenCode server failed to start.`,
-      { port, stderr: '', command },
+      `OpenCode server failed to start: ${diagnostics}`,
+      { port, stderr: stderrStr, command },
       { cause: e }
     );
   }

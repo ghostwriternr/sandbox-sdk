@@ -42,9 +42,11 @@ describe('Shell', () => {
 
   it('runs commands and collects results', async () => {
     const execMock = vi.fn().mockResolvedValue({
-      stdout: 'hello\n',
-      stderr: '',
-      exitCode: 0
+      output: async () => ({
+        stdout: new TextEncoder().encode('hello\n').buffer,
+        stderr: new TextEncoder().encode('').buffer,
+        exitCode: 0
+      })
     });
 
     const mockSandbox: MockSandbox = { exec: execMock };

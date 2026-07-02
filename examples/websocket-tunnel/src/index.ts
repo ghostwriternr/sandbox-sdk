@@ -93,10 +93,15 @@ export default {
 
     const sandbox = getSandbox(env.Sandbox, 'websocket-demo');
 
-    const proc = await sandbox.exec('bun /app/server.js', {
-      env: { PORT: `${WS_PORT}` }
-    });
-    await proc.waitForPort(WS_PORT);
+    // Check if the port is already listening before spawning
+    const checkPort = await sandbox.exec(`nc -z 127.0.0.1 ${WS_PORT}`);
+    const checkResult = await checkPort.output();
+    if (checkResult.exitCode !== 0) {
+      const proc = await sandbox.exec('bun /app/server.js', {
+        env: { PORT: `${WS_PORT}` }
+      });
+      await proc.waitForPort(WS_PORT);
+    }
 
     const { tunnel, error } = await getTunnel(sandbox, env);
     if (!tunnel) {

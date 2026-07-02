@@ -4544,7 +4544,7 @@ export class Sandbox<Env = unknown> extends Container<Env> implements ISandbox {
           return this.readFile(path, { encoding: 'none', sessionId });
         }
         return this.readFile(path, { encoding, sessionId });
-      }) as ExecutionSession['readFile'],
+      }) as unknown as ExecutionSession['readFile'],
       readFileStream: (path: string) =>
         this.readFileStream(path, { sessionId }),
       watch: (path: string, options?: WatchOptions) =>

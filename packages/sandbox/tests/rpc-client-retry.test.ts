@@ -101,7 +101,7 @@ describe('ContainerControlClient retry timeout wiring', () => {
     });
 
     // Force connection construction by touching a sub-client.
-    void client.commands;
+    void client.files;
 
     expect(captured.options).toHaveLength(1);
     expect(captured.options[0].retryTimeoutMs).toBe(75_000);
@@ -112,7 +112,7 @@ describe('ContainerControlClient retry timeout wiring', () => {
       stub: { fetch: vi.fn() }
     });
 
-    void client.commands;
+    void client.files;
 
     expect(captured.options).toHaveLength(1);
     expect(captured.options[0].retryTimeoutMs).toBeUndefined();
@@ -124,7 +124,7 @@ describe('ContainerControlClient retry timeout wiring', () => {
       retryTimeoutMs: 60_000
     });
 
-    void client.commands;
+    void client.files;
 
     client.setRetryTimeoutMs(45_000);
 
@@ -141,7 +141,7 @@ describe('ContainerControlClient retry timeout wiring', () => {
     // construction, or by applying it immediately if a connection is present.
     client.setRetryTimeoutMs(15_000);
 
-    void client.commands;
+    void client.files;
 
     expect(captured.options).toHaveLength(1);
     expect(captured.options[0].retryTimeoutMs).toBe(15_000);

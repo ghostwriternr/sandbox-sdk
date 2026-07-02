@@ -93,7 +93,7 @@ describe('ContainerControlClient busy/idle tracking', () => {
     });
 
     // Touching a sub-client constructs the connection and starts the poller.
-    void client.commands;
+    void client.files;
 
     // Simulate a control-plane method returning a ReadableStream: capnweb has
     // allocated an export for the pipe, and it stays elevated for the
@@ -138,7 +138,7 @@ describe('ContainerControlClient busy/idle tracking', () => {
       busyPollIntervalMs: 1_000,
       idleDisconnectMs: 60_000
     });
-    void client.commands;
+    void client.files;
 
     stats = { imports: 1, exports: 2 };
     vi.advanceTimersByTime(1_000);
@@ -162,7 +162,7 @@ describe('ContainerControlClient busy/idle tracking', () => {
       busyPollIntervalMs: 1_000,
       idleDisconnectMs: 60_000
     });
-    void client.commands;
+    void client.files;
 
     stats = { imports: 1, exports: 2 };
     vi.advanceTimersByTime(1_000);
@@ -200,7 +200,7 @@ describe('ContainerControlClient busy/idle tracking', () => {
       busyPollIntervalMs: 1_000,
       idleDisconnectMs: 60_000
     });
-    void client.commands;
+    void client.files;
 
     // Several poll ticks while the upgrade is still pending. Must not
     // dispose the connection — the deferred transport's queue is the

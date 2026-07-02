@@ -643,11 +643,11 @@ export interface ExecutionSession {
   readFile(
     path: string,
     options: { encoding: 'none' }
-  ): Promise<ReadableStream<Uint8Array>>;
+  ): Promise<ReadFileStreamResult>;
   readFile(
     path: string,
     options?: { encoding?: Exclude<FileEncoding, 'none'> }
-  ): Promise<string>;
+  ): Promise<ReadFileResult>;
   readFileStream(path: string): Promise<ReadableStream<Uint8Array>>;
   watch(
     path: string,
@@ -916,11 +916,11 @@ export interface ISandbox {
   readFile(
     path: string,
     options: { encoding: 'none'; sessionId?: string }
-  ): Promise<ReadableStream<Uint8Array>>;
+  ): Promise<ReadFileStreamResult>;
   readFile(
     path: string,
     options?: { encoding?: Exclude<FileEncoding, 'none'>; sessionId?: string }
-  ): Promise<string>;
+  ): Promise<ReadFileResult>;
   readFileStream(
     path: string,
     options?: { sessionId?: string }

@@ -18,9 +18,9 @@ vi.mock('@opencode-ai/sdk/v2/client', () => ({
 /** Minimal mock for SandboxProcess methods used by OpenCode integration */
 interface MockProcess {
   pid: number;
-  stdin: any;
-  stdout: any;
-  stderr: any;
+  stdin: WritableStream<Uint8Array> | null;
+  stdout: ReadableStream<Uint8Array> | null;
+  stderr: ReadableStream<Uint8Array> | null;
   exitCode: Promise<number>;
   waitForPort: ReturnType<typeof vi.fn>;
   kill: ReturnType<typeof vi.fn>;
@@ -42,13 +42,11 @@ function createMockProcess(overrides: Partial<MockProcess> = {}): MockProcess {
     exitCode: Promise.resolve(0),
     waitForPort: vi.fn().mockResolvedValue(undefined),
     kill: vi.fn().mockResolvedValue(undefined),
-    output: vi
-      .fn()
-      .mockResolvedValue({
-        stdout: new Uint8Array(),
-        stderr: new Uint8Array(),
-        exitCode: 0
-      }),
+    output: vi.fn().mockResolvedValue({
+      stdout: new Uint8Array(),
+      stderr: new Uint8Array(),
+      exitCode: 0
+    }),
     ...overrides
   };
 }
@@ -68,7 +66,18 @@ describe('createOpencode', () => {
   beforeEach(() => {
     mockProcess = createMockProcess();
     mockSandbox = createMockSandbox({
-      exec: vi.fn().mockResolvedValue(mockProcess)
+      exec: vi.fn().mockImplementation(async (command: string) => {
+        if (command.includes('nc -z')) {
+          return createMockProcess({
+            output: vi.fn().mockResolvedValue({
+              stdout: new Uint8Array(),
+              stderr: new Uint8Array(),
+              exitCode: 1 // port is not listening
+            })
+          });
+        }
+        return mockProcess;
+      })
     });
   });
 
@@ -205,6 +214,30 @@ describe('createOpencode', () => {
     expect(result.server.url).toBe('http://localhost:4096');
   });
 
+  it('should reuse existing server if already healthy/reachable on target port', async () => {
+    mockSandbox.exec = vi.fn().mockImplementation(async (command: string) => {
+      if (command.includes('nc -z')) {
+        return createMockProcess({
+          output: vi.fn().mockResolvedValue({
+            stdout: new Uint8Array().buffer,
+            stderr: new Uint8Array().buffer,
+            exitCode: 0 // already listening
+          })
+        });
+      }
+      return mockProcess;
+    });
+
+    const result = await createOpencode(mockSandbox as unknown as Sandbox);
+
+    // Should NOT have run the opencode serve command
+    expect(mockSandbox.exec).not.toHaveBeenCalledWith(
+      expect.stringContaining('opencode serve'),
+      expect.any(Object)
+    );
+    expect(result.server.port).toBe(4096);
+  });
+
   it('should provide close method that kills process', async () => {
     const result = await createOpencode(mockSandbox as unknown as Sandbox);
 
@@ -242,7 +275,7 @@ describe('createOpencode', () => {
         })
       );
       // Should NOT have any *_API_KEY env vars from malformed config
-      const callArgs = mockSandbox.exec.mock.calls[0][1];
+      const callArgs = mockSandbox.exec.mock.calls[1][1];
       const envKeys = Object.keys(callArgs.env);
       expect(envKeys.filter((k: string) => k.endsWith('_API_KEY'))).toEqual([]);
     });
