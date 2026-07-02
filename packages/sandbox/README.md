@@ -82,8 +82,10 @@ export default {
 
     // Execute Python code
     if (url.pathname === '/run') {
-      const result = await sandbox.exec('python3 -c "print(2 + 2)"');
-      return Response.json({ output: result.stdout, success: result.success });
+      const proc = await sandbox.exec('python3 -c "print(2 + 2)"');
+      const output = await proc.output();
+      const text = new TextDecoder().decode(output.stdout);
+      return Response.json({ output: text, success: output.success });
     }
 
     // Work with files
@@ -96,6 +98,37 @@ export default {
     return new Response('Try /run or /file');
   }
 };
+```
+
+## Command Execution
+
+To execute commands stateless by default:
+
+```ts
+const proc = await sandbox.exec('python --version');
+const output = await proc.output();
+console.log(new TextDecoder().decode(output.stdout));
+```
+
+### Explicit Sessions
+
+For persistent shell state (like `cd`, environment variables, or aliases), use an explicit session:
+
+```ts
+const session = await sandbox.createSession();
+await session.exec('cd /workspace/app');
+await session.exec('export NODE_ENV=test');
+const tests = await session.exec('npm test');
+const result = await tests.output();
+```
+
+### Long-Running Services
+
+You can also launch and await long-running services:
+
+```ts
+const server = await sandbox.exec('npm run dev');
+await server.waitForPort(3000);
 ```
 
 ## Quick tunnels

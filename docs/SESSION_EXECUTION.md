@@ -1,8 +1,7 @@
 # Session Execution Architecture
 
 This document describes the current command execution model in the sandbox
-runtime. The model intentionally separates completion-only command execution,
-process lifecycle management, and terminal/PTY interaction.
+runtime. The model utilizes process handles for execution, and separates shell sessions and terminal/PTY interaction.
 
 ## Goals
 
@@ -10,24 +9,21 @@ process lifecycle management, and terminal/PTY interaction.
    session.
 2. Preserve shell state for explicit command sessions (`cd`, `export`, aliases,
    functions, sourced scripts).
-3. Keep `exec()` completion-only: it returns final stdout, stderr, and exit code.
-4. Put streaming, cancellation, timeout recovery, and process-tree cleanup on
-   `startProcess()`.
-5. Keep terminal resources separate from command sessions. Terminals expose PTY
+3. `exec()` returns a process handle, and `output()` is the buffered convenience.
+4. Keep terminal resources separate from command sessions. Terminals expose PTY
    bytes, not structured stdout/stderr.
 
 ## Public Execution Surfaces
 
-| API                      | State persists?                  | Streaming? | Killable?                     | Runtime primitive               |
-| ------------------------ | -------------------------------- | ---------- | ----------------------------- | ------------------------------- |
-| `sandbox.exec()`         | No                               | No         | No                            | `StatelessCommandRunner`        |
-| `sandbox.startProcess()` | No                               | Yes        | Yes                           | `StatelessProcessRunner`        |
-| `session.exec()`         | Yes                              | No         | No                            | `CommandSession.exec()`         |
-| `session.startProcess()` | Inherits session state at launch | Yes        | Yes                           | `CommandSession.startProcess()` |
-| `sandbox.terminal()`     | Independent PTY state            | PTY bytes  | Destroyable terminal resource | `TerminalManager` / `Pty`       |
+| API                      | State persists?                    | Backend                                                    | Output model                |
+| ------------------------ | ---------------------------------- | ---------------------------------------------------------- | --------------------------- |
+| `sandbox.exec(string)`   | No                                 | Native `ctx.container.exec(['/bin/bash', '-lc', command])` | Workerd-like process handle |
+| `sandbox.exec(string[])` | No                                 | Native `ctx.container.exec(argv)`                          | Workerd-like process handle |
+| `session.exec(string)`   | Yes                                | Persistent `CommandSession` shell                          | Workerd-like process handle |
+| `session.exec(string[])` | Inherits session cwd/env at launch | Session runtime process                                    | Workerd-like process handle |
+| `sandbox.terminal()`     | Independent PTY state              | Terminal manager                                           | PTY bytes                   |
 
-There is no public streaming `exec()` API. Streaming belongs to process
-resources, not completion-only command calls.
+`exec()` returns a process handle, and `output()` is the buffered convenience. Let's look at the implementation details.
 
 ## Top-Level Stateless Execution
 
@@ -70,13 +66,13 @@ session.exec(command)
 ```
 
 `CommandSession.exec()` runs in the persistent bash shell so state changes write
-back to the session. It is completion-only and returns:
+back to the session. It returns a process handle, and calling `output()` on it resolves with:
 
 ```ts
 {
   exitCode: number;
-  stdout: string;
-  stderr: string;
+  stdout: Uint8Array;
+  stderr: Uint8Array;
 }
 ```
 
@@ -135,10 +131,9 @@ sandbox.terminal({ id, cwd, shell })
 Terminal lifecycle operations such as `destroy()` use semantic RPC methods;
 `/ws/terminal` is the byte transport for attaching to an existing terminal.
 
-## Completion-Only Persistent Exec Mechanics
+## Persistent Exec Mechanics
 
-`CommandSession.exec()` uses file-backed capture for persistent,
-completion-only execution:
+`CommandSession.exec()` runs commands in persistent bash shells:
 
 1. Run the command in the persistent bash shell so state can persist.
 2. Redirect stdout and stderr to command-specific temp files.
