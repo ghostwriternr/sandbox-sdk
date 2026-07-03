@@ -1,3 +1,4 @@
+import { RpcTarget } from 'cloudflare:workers';
 import type {
   ExecOutput,
   SandboxProcess,
@@ -20,7 +21,7 @@ export interface SandboxProcessSource {
   ): Promise<void>;
 }
 
-export class SandboxProcessImpl implements SandboxProcess {
+export class SandboxProcessImpl extends RpcTarget implements SandboxProcess {
   readonly pid: number;
   readonly stdin: WritableStream<Uint8Array> | null;
   readonly stdout: ReadableStream<Uint8Array> | null;
@@ -30,6 +31,7 @@ export class SandboxProcessImpl implements SandboxProcess {
   #outputCalled = false;
 
   constructor(private readonly source: SandboxProcessSource) {
+    super();
     this.pid = source.pid;
     this.stdin = source.stdin;
     this.stdout = source.stdout;
@@ -44,7 +46,7 @@ export class SandboxProcessImpl implements SandboxProcess {
     this.#outputCalled = true;
 
     if (this.source.output) {
-      return this.source.output();
+      return plainExecOutput(await this.source.output());
     }
 
     const [stdout, stderr, exitCode] = await Promise.all([
@@ -53,7 +55,7 @@ export class SandboxProcessImpl implements SandboxProcess {
       this.exitCode
     ]);
 
-    return { stdout, stderr, exitCode };
+    return plainExecOutput({ stdout, stderr, exitCode });
   }
 
   kill(signal?: number): void | Promise<void> {
@@ -63,6 +65,14 @@ export class SandboxProcessImpl implements SandboxProcess {
   waitForPort(port: number, options?: WaitForPortOptions): Promise<void> {
     return this.source.waitForPort(port, options, this.exitCode);
   }
+}
+
+function plainExecOutput(output: ExecOutput): ExecOutput {
+  return {
+    stdout: output.stdout,
+    stderr: output.stderr,
+    exitCode: output.exitCode
+  };
 }
 
 export function createSandboxProcess(
